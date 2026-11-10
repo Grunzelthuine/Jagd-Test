@@ -349,6 +349,7 @@ window.Konto = (() => {
   const standalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
   async function currentSub() { try { const reg = await navigator.serviceWorker.ready; return await reg.pushManager.getSubscription(); } catch { return null; } }
   async function pushEnable() {
+    if (!hatZugang()) throw new Error('Benachrichtigungen gibt es nur mit freigegebenem Konto – bitte zuerst anmelden.');
     if (!pushSupported()) throw new Error(isIOS() && !standalone() ? 'Auf dem iPhone geht das nur in der installierten App (Home-Bildschirm).' : 'Dieser Browser unterstützt keine Benachrichtigungen.');
     const p = await Notification.requestPermission();
     if (p !== 'granted') throw new Error('Benachrichtigungen nicht erlaubt – änderbar in den Handy-Einstellungen.');

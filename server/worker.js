@@ -408,9 +408,11 @@ async function proxy(req, env, url, ctx) {
     if (!darf) fail(403, 'Dafür fehlt dir das Recht. Bitte Sebastian fragen.');
     text = await req.text();
     try { payload = JSON.parse(text); } catch { fail(400, 'Ungültige Anfrage'); }
-    // Wer etwas ändert, steht als Autor im GitHub-Verlauf
-    payload.author = { name: u.name, email: 'konto@jagd-thuine.invalid' };
-    text = JSON.stringify(payload);
+    // Das Repo ist öffentlich: Commit-Text ohne Namen und Inhalte.
+    // Der echte Text (wer, was) steht nur im geschützten Protokoll des Servers.
+    payload._orig = String(payload.message || '');
+    const neutral = m === 'DELETE' ? 'Datei entfernt (App)' : 'Daten aktualisiert (App)';
+    text = JSON.stringify({ ...payload, message: neutral, _orig: undefined });
   } else if (m !== 'GET') fail(405, 'Nicht erlaubt');
   if (!env.GH_TOKEN) fail(500, 'GH_TOKEN fehlt im Server (Einstellungen → Variablen und Geheimnisse).');
   const api = (env.GH_API || 'https://api.github.com').replace(/\/$/, '');
@@ -424,7 +426,7 @@ async function proxy(req, env, url, ctx) {
   if (text) h['Content-Type'] = 'application/json';
   const r = await fetch(target, { method: m, headers: h, body: text });
   if (r.ok && (m === 'PUT' || m === 'DELETE')) {
-    const was = String(payload?.message || (m === 'DELETE' ? 'Datei gelöscht' : 'Änderung')).slice(0, 200);
+    const was = String(payload?._orig || (m === 'DELETE' ? 'Datei gelöscht' : 'Änderung')).slice(0, 200);
     ctx.waitUntil(log(env, u, was, { app, pfad }));
   }
   const out = new Headers();
@@ -450,10 +452,12 @@ async function pushAbo(req, env) {
   if (!CONFIG.apps[b.app]) fail(400, 'Unbekannte App.');
   const s = b.sub;
   if (!s?.endpoint || !(/^https:\/\//.test(s.endpoint) || env.TEST_HTTP_PUSH) || !s.keys?.p256dh || !s.keys?.auth) fail(400, 'Ungültiges Abo.');
-  const u = await auth(req, env, { optional: true });
+  // Nur freigegebene Konten (die Nachrichten enthalten Namen)
+  const u = await auth(req, env);
+  if (!hatZugang(u, b.app)) fail(403, `Kein Zugang zu ${CONFIG.apps[b.app].name}.`);
   const subs = await kvGet(env, subKey(b.app), {});
   const id = b64u(new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(s.endpoint)))).slice(0, 22);
-  subs[id] = { endpoint: s.endpoint, keys: { p256dh: s.keys.p256dh, auth: s.keys.auth }, user: u?.id || null, seit: subs[id]?.seit || new Date().toISOString() };
+  subs[id] = { endpoint: s.endpoint, keys: { p256dh: s.keys.p256dh, auth: s.keys.auth }, user: u.id, seit: subs[id]?.seit || new Date().toISOString() };
   const ids = Object.keys(subs);
   if (ids.length > MAX_SUBS) ids.sort((a, c) => subs[a].seit.localeCompare(subs[c].seit)).slice(0, ids.length - MAX_SUBS).forEach(k => delete subs[k]);
   await kvPut(env, subKey(b.app), subs);
@@ -488,6 +492,9 @@ async function pushTest(req, env) {
 }
 async function sendeAnAlle(env, app, msg) {
   const subs = await kvGet(env, subKey(app), {});
+  const users = await getUsers(env);
+  // nur Geräte von Konten, die (noch) Zugang haben
+  for (const [k, v] of Object.entries(subs)) { const u = users[v.user]; if (!u || !hatZugang(u, app)) delete subs[k]; }
   const ids = Object.keys(subs).slice(0, 45); // Grenze kostenloser Plan: 50 Anfragen je Aufruf
   let ok = 0, weg = 0, fehler = 0;
   const results = await Promise.all(ids.map(id => sendePush(env, subs[id], msg).catch(() => 0)));
@@ -496,7 +503,7 @@ async function sendeAnAlle(env, app, msg) {
     else if (st === 404 || st === 410) { delete subs[ids[i]]; weg++; }
     else fehler++;
   });
-  if (weg) await kvPut(env, subKey(app), subs);
+  await kvPut(env, subKey(app), subs);
   return { ok, entfernt: weg, fehler, gesamt: Object.keys(subs).length };
 }
 async function vapidHeader(env, endpoint) {

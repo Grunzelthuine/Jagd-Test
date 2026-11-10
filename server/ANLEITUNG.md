@@ -32,12 +32,21 @@ Worker `jagd-test` → **Settings** → **Variables and Secrets** → **Add**:
 - Value: der Token aus Schritt 1
 - Speichern / **Deploy**.
 
-## 5. Prüfen und Adresse schicken
+## 5. Claude-Schlüssel für die Foto-Auswertung
+
+1. **console.anthropic.com** → **Settings → Workspaces** → neuen Workspace `Jagd Thuine` anlegen.
+2. Im Workspace unter **Limits** ein monatliches Ausgabenlimit setzen (z. B. 5 €) – das ist die feste Obergrenze.
+3. **API Keys** → **Create Key** im Workspace `Jagd Thuine` → Schlüssel kopieren.
+4. Worker `jagd-test` → **Settings** → **Variables and Secrets** → **Add** → Type **Secret**, Name **`ANTHROPIC_KEY`**, Value = der Schlüssel → Speichern / **Deploy**.
+
+Danach braucht kein Admin mehr einen eigenen Schlüssel auf dem Handy. Der Server erlaubt nur die Auswertung der Erlegerliste (festes Modell, begrenzte Antwortlänge, 20 Auswertungen pro Admin und Tag, 60 gesamt) und schreibt jede Auswertung ins Protokoll. Die Werte stehen oben in `worker.js` unter `ki:`.
+
+## 6. Prüfen und Adresse schicken
 
 1. Die Adresse des Workers steht oben, z. B. `https://jagd-test.DEINNAME.workers.dev`.
-2. Im Browser öffnen: Es muss ein Text mit `"name":"Jagd Thuine – TEST"` und `"ersterNutzer":true` erscheinen.
+2. Im Browser öffnen: Es muss ein Text mit `"name":"Jagd Thuine – TEST"`, `"ersterNutzer":true` und `"ki":true` erscheinen.
 3. Die Adresse an Claude schicken – dann wird sie in den Test-Apps eingetragen.
 
-## 6. Erstes Konto = Haupt-Admin
+## 7. Erstes Konto = Haupt-Admin
 
 Sobald die Adresse eingetragen ist: Test-App öffnen → **Mit Konto anmelden** → Konto anlegen. **Das erste Konto wird automatisch Haupt-Admin** – also selbst als Erster registrieren. Danach einmal das Passwort der Jagdgemeinschaft eingeben; es wird dann im Server hinterlegt.

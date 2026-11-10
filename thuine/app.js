@@ -26,7 +26,7 @@ async function repairApp() {
 window.addEventListener('error', e => showRescue(e.message));
 window.addEventListener('unhandledrejection', e => { if (!(e.reason && e.reason.name === 'AbortError')) showRescue(e.reason?.message || e.reason); });
 
-const APP_VERSION = '2.24.1';
+const APP_VERSION = '2.24.2';
 /* Einstellungen je Installation (config.js): Konten-Server, Test-Umgebung, abweichende Speicherorte */
 const CONF = self.JAGD_CFG || {};
 const LSP = CONF.lsPrefix || '';
@@ -1889,8 +1889,9 @@ async function saveEditor() {
 }
 
 /* ================= Foto → KI ================= */
+const kiUeberServer = () => !!window.Konto?.kiServer();
 function startPhoto() {
-  if (!state.cfg.apiKey) {
+  if (!kiUeberServer() && !state.cfg.apiKey) {
     toast('Für die Foto-Auswertung bitte zuerst den Anthropic-API-Schlüssel in den Einstellungen eintragen.', 4500);
     openSettings(); return;
   }
@@ -1965,6 +1966,11 @@ async function analysePhoto(file) {
   try {
     const dataUrl = await imageToJpeg(file);
     const b64 = dataUrl.split(',')[1];
+    let text;
+    if (kiUeberServer()) {
+      // Schlüssel liegt im Konten-Server – auf dem Gerät ist keiner nötig
+      text = (await Konto.ki(b64, buildPrompt(), ctrl.signal)).text;
+    } else {
     const model = state.cfg.model || FALLBACK_MODEL;
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST', signal: ctrl.signal,
@@ -1984,7 +1990,8 @@ async function analysePhoto(file) {
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j?.error?.message || `API-Fehler ${r.status}`);
-    const text = (j.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
+    text = (j.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
+    }
     const m = text.match(/\{[\s\S]*\}/);
     if (!m) throw new Error('Antwort der KI enthielt kein JSON.');
     const parsed = JSON.parse(m[0]);
@@ -2118,11 +2125,13 @@ function openSettings() {
       <p class="hint">${state.pw ? 'Die Daten werden verschlüsselt gespeichert. Alle Jäger brauchen dieses Passwort zum Ansehen.' : '<b>Noch kein Passwort gesetzt – die Daten sind im Klartext lesbar.</b>'} Ändern: neues Passwort eintragen und übernehmen, danach müssen alle Jäger das neue Passwort einmal eingeben. <b>Passwort gut aufbewahren – ohne es sind die Daten nicht mehr lesbar.</b></p>
     </fieldset>` : ''}
     <fieldset ${isAdmin() ? '' : 'hidden'}><legend>Foto-Auswertung (KI)</legend>
+      ${kiUeberServer() ? '<p class="hint"><b>✓ Läuft über den Konten-Server</b> – auf diesem Gerät ist kein Schlüssel nötig. Tageslimit je Admin, jede Auswertung steht im Protokoll.</p><details><summary>Eigener Schlüssel auf diesem Gerät (nur ohne Server)</summary>' : ''}
       <label class="field"><span>Anthropic-API-Schlüssel (nur auf diesem Gerät gespeichert)</span><input id="cfKey" type="password" value="${esc(c.apiKey)}" placeholder="sk-ant-…" autocomplete="off"></label>
       <label class="field"><span>Modell</span>
         <select id="cfModel">${c.model ? `<option value="${esc(c.model)}" selected>${esc(c.model)}</option>` : `<option value="">Standard (${FALLBACK_MODEL})</option>`}</select>
       </label>
       <button class="btn secondary block" id="cfLoadModels">Verfügbare Modelle laden</button>
+      ${kiUeberServer() ? '</details>' : ''}
     </fieldset>
     ${isAdmin() ? `
     <fieldset><legend>Schützen</legend>

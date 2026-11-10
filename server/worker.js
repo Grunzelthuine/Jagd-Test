@@ -42,6 +42,8 @@ const CONFIG = {
       ],
     },
   },
+  // Foto-Auswertung (Claude). Schlüssel als Secret ANTHROPIC_KEY. Nur Admins dieser App.
+  ki: { app: 'thuine', modell: 'claude-sonnet-4-6', maxTokens: 3000, proTagUndPerson: 20, proTagGesamt: 60 },
 };
 /* ========================================================= */
 
@@ -106,6 +108,7 @@ async function route(req, env, ctx) {
   if (p === '/admin/datenpw' && m === 'POST') return adminDatenPw(req, env);
   if (p === '/admin/einstellungen' && m === 'POST') return adminEinstellungen(req, env);
 
+  if (p === '/ki/erlegerliste' && m === 'POST') return kiErlegerliste(req, env, ctx);
   if (p === '/push/abo' && m === 'POST') return pushAbo(req, env);
   if (p === '/push/abmelden' && m === 'POST') return pushAbmelden(req, env);
   if (p === '/push/senden' && m === 'POST') return pushSendenRoute(req, env, ctx);
@@ -128,6 +131,7 @@ async function info(env) {
     nurKonten: !!settings.nurKonten,
     ersterNutzer: !Object.keys(users).length,
     vapid: vapid.pub,
+    ki: !!(env.ANTHROPIC_KEY && CONFIG.ki),
   };
 }
 
@@ -434,6 +438,45 @@ async function proxy(req, env, url, ctx) {
   out.set('Cache-Control', 'no-store');
   if (r.status === 401) return json({ fehler: 'GitHub-Token im Server ungültig oder abgelaufen – bitte Sebastian Bescheid geben.' }, 502);
   return new Response(r.body, { status: r.status, headers: out });
+}
+
+/* ===================== Foto-Auswertung (Claude) =====================
+   Der Schlüssel bleibt im Server. Erlaubt ist nur: ein Foto + Auslese-Anweisung,
+   festes Modell, begrenzte Antwortlänge, Tageslimit je Person und gesamt. */
+async function kiErlegerliste(req, env, ctx) {
+  const K = CONFIG.ki;
+  if (!K || !env.ANTHROPIC_KEY) fail(501, 'Foto-Auswertung ist im Server nicht eingerichtet (ANTHROPIC_KEY fehlt).');
+  const u = await auth(req, env);
+  if (!isAppAdmin(u, K.app)) fail(403, 'Die Foto-Auswertung dürfen nur Admins nutzen.');
+  const b = await body(req);
+  const bild = String(b.bild || ''), text = String(b.text || '');
+  if (!/^[A-Za-z0-9+/=]+$/.test(bild) || bild.length < 1000) fail(400, 'Kein gültiges Foto.');
+  if (bild.length > 4_500_000) fail(413, 'Foto zu groß.');
+  if (!text.startsWith('Du liest eine handschriftlich ausgefüllte "Erlegerliste"') || text.length > 15000) fail(400, 'Ungültige Anweisung.');
+  // Tageslimits
+  const tag = new Date().toISOString().slice(0, 10);
+  const zaehler = await kvGet(env, `ki:${tag}`, {});
+  if ((zaehler[u.id] || 0) >= K.proTagUndPerson) fail(429, `Tageslimit erreicht (${K.proTagUndPerson} Auswertungen pro Tag).`);
+  const gesamt = Object.values(zaehler).reduce((a, n) => a + n, 0);
+  if (gesamt >= K.proTagGesamt) fail(429, 'Tageslimit der Jagdgemeinschaft erreicht – bitte morgen erneut versuchen.');
+  zaehler[u.id] = (zaehler[u.id] || 0) + 1;
+  await env.DB.put(`ki:${tag}`, JSON.stringify(zaehler), { expirationTtl: 3 * 86400 });
+  const api = (env.ANTHROPIC_API || 'https://api.anthropic.com').replace(/\/$/, '');
+  const r = await fetch(`${api}/v1/messages`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': env.ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify({
+      model: K.modell, max_tokens: K.maxTokens,
+      messages: [{ role: 'user', content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: bild } },
+        { type: 'text', text },
+      ] }],
+    }),
+  });
+  const j = await r.json().catch(() => ({}));
+  ctx.waitUntil(log(env, u, `Foto-Auswertung${r.ok ? '' : ' fehlgeschlagen'} (${zaehler[u.id]}/${K.proTagUndPerson} heute)`, { app: K.app }));
+  if (!r.ok) fail(502, r.status === 401 ? 'Claude-Schlüssel im Server ungültig – bitte Sebastian Bescheid geben.' : `Claude-Fehler: ${j?.error?.message || r.status}`);
+  return json({ text: (j.content || []).filter(c => c.type === 'text').map(c => c.text).join(''), heute: zaehler[u.id], limit: K.proTagUndPerson });
 }
 
 /* ===================== Push (Web Push mit VAPID) ===================== */

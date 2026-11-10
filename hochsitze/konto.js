@@ -23,16 +23,16 @@ window.Konto = (() => {
   const save = () => sv(LSK, st);
 
   /* ---------- Server ---------- */
-  async function api(method, path, body, { auth = true } = {}) {
+  async function api(method, path, body, { auth = true, signal } = {}) {
     if (!API) throw new Error('Kein Konten-Server eingerichtet.');
     let r;
     try {
       r = await fetch(API + path, {
-        method, cache: 'no-store',
+        method, cache: 'no-store', signal,
         headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...(auth && st.token ? { Authorization: 'Bearer ' + st.token } : {}) },
         body: body ? JSON.stringify(body) : undefined,
       });
-    } catch { throw new Error('Keine Verbindung zum Server.'); }
+    } catch (e) { if (e.name === 'AbortError') throw e; throw new Error('Keine Verbindung zum Server.'); }
     let j = {}; try { j = await r.json(); } catch { /* leer */ }
     if (!r.ok) {
       const e = new Error(j.fehler || `Server-Fehler ${r.status}`); e.status = r.status;
@@ -412,7 +412,7 @@ window.Konto = (() => {
     if (CFG.test && !$('#ktTest')) document.body.insertAdjacentHTML('beforeend', '<div id="ktTest">TEST</div>');
     if (!enabled()) return;
     if (st.token) refresh();
-    info().catch(() => {});
+    info(true).catch(() => {});
     pushKeepAlive();
     clearBadge();
     document.addEventListener('visibilitychange', () => {
@@ -422,7 +422,10 @@ window.Konto = (() => {
     });
   }
   const nurKonten = () => !!inf?.nurKonten;
+  /** Foto-Auswertung über den Server (Schlüssel bleibt dort) */
+  const kiServer = () => !!(inf?.ki && isAdmin());
+  const ki = (bild, text, signal) => api('POST', '/ki/erlegerliste', { bild, text }, { signal });
 
   return { init, enabled, loggedIn, user, rolle, isAdmin, isAnyAdmin, hatZugang, can, token, ghBase, dataPw, refresh, abmelden, setDataPw, info, nurKonten,
-    openLogin, openAdmin, settingsHtml, wireSettings, pushSend, pushEnable, pushSupported, clearBadge };
+    openLogin, openAdmin, settingsHtml, wireSettings, pushSend, kiServer, ki, pushEnable, pushSupported, clearBadge };
 })();

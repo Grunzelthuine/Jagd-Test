@@ -1,52 +1,84 @@
 # Konten-Server einrichten (Cloudflare, kostenlos)
 
-Dauer: etwa 20 Minuten. Die Bezeichnungen bei GitHub und Cloudflare können leicht abweichen.
+Dauer: etwa 20–30 Minuten, am besten am PC. Die Bezeichnungen bei GitHub, Cloudflare und Anthropic können leicht abweichen.
+
+## Checkliste
+
+- [ ] 1. GitHub-Token erstellen (nur für `Jagd-Test`)
+- [ ] 2. Cloudflare-Konto anlegen
+- [ ] 3. Worker `jagd-test` anlegen und Code einfügen
+- [ ] 4. KV-Speicher anlegen und als `DB` verbinden
+- [ ] 5. Secret `GH_TOKEN` hinterlegen
+- [ ] 6. Claude-Schlüssel erstellen und als Secret `ANTHROPIC_KEY` hinterlegen
+- [ ] 7. Adresse prüfen und an Claude schicken
+- [ ] 8. (nach Claudes Rückmeldung) Als Erster ein Konto anlegen = Haupt-Admin
+
+**Tipp:** Token und Schlüssel werden jeweils nur einmal angezeigt. Am besten sofort in Cloudflare einfügen und nirgends sonst speichern (nicht in Chat, Mail oder WhatsApp).
+
+---
 
 ## 1. GitHub-Token für den Server
 
-1. github.com → oben rechts Profilbild → **Settings** → ganz unten **Developer settings** → **Personal access tokens** → **Fine-grained tokens** → **Generate new token**.
-2. Name: `Jagd-Test Server`. Ablauf: so lang wie möglich (vor Ablauf erneuern).
-3. **Repository access:** *Only select repositories* → `Jagd-Test`.
-4. **Permissions → Repository permissions → Contents:** *Read and write*.
-5. **Generate token** und den Token kopieren (er wird nur einmal angezeigt).
+1. github.com → oben rechts Profilbild → **Settings** → links ganz unten **Developer settings** → **Personal access tokens** → **Fine-grained tokens** → **Generate new token**.
+2. **Token name:** `Jagd-Test Server`
+3. **Expiration:** so lang wie möglich (vor Ablauf erneuern – dann geht Schreiben nicht mehr, Lesen schon).
+4. **Repository access:** *Only select repositories* → `Grunzelthuine/Jagd-Test`.
+5. **Permissions → Repository permissions → Contents:** *Read and write* (Metadata „Read-only“ kommt automatisch dazu).
+6. **Generate token** → Token kopieren (beginnt mit `github_pat_`).
 
-## 2. Cloudflare-Konto und Worker
+## 2. Cloudflare-Konto
 
-1. Auf **dash.cloudflare.com** ein kostenloses Konto anlegen und die E-Mail bestätigen.
-2. Links **Workers & Pages** (bzw. *Compute*) → **Create** → **Worker** → Vorlage „Hello World“ → Name **`jagd-test`** → **Deploy**.
-3. **Edit code** → den vorhandenen Code komplett löschen → den Inhalt von [`server/worker.js`](https://raw.githubusercontent.com/Grunzelthuine/Jagd-Test/main/server/worker.js) einfügen → **Deploy**.
+1. **dash.cloudflare.com** → *Sign up* → E-Mail und Passwort → E-Mail bestätigen.
+2. Empfohlen: unter *Profil → Authentication* die **Zwei-Faktor-Anmeldung** einschalten.
+3. Es wird keine Domain und keine Zahlungsart gebraucht. Fragen nach „Website hinzufügen“ einfach überspringen.
 
-## 3. Speicher (KV) anlegen und verbinden
+## 3. Worker anlegen und Code einfügen
 
-1. Links **Storage & Databases → KV** (bzw. *Workers KV*) → **Create** → Name `jagd-test` → anlegen.
-2. Zurück zum Worker `jagd-test` → **Settings** → **Bindings** → **Add** → **KV namespace**.
-   - Variable name: **`DB`** (genau so, Großbuchstaben)
-   - KV namespace: `jagd-test`
-   - Speichern / **Deploy**.
+1. Links **Workers & Pages** (evtl. unter *Compute*) → **Create application** → **Start with Hello World!** → **Get started**.
+2. Name: **`jagd-test`** → **Deploy**.
+3. **Edit Code** → im Editor alles markieren und löschen.
+4. Den Code von hier kopieren: <https://raw.githubusercontent.com/Grunzelthuine/Jagd-Test/main/server/worker.js> (Seite öffnen, Strg+A, Strg+C) → im Editor einfügen.
+5. Oben rechts **Deploy** (bzw. Pfeil neben Deploy → *Save and deploy*).
 
-## 4. GitHub-Token hinterlegen
+## 4. Speicher (KV) anlegen und verbinden
+
+1. Links **Storage & Databases → Workers KV** → **Create instance** → Name `jagd-test` → **Create**.
+2. Zurück zu **Workers & Pages** → Worker `jagd-test` öffnen → Reiter **Bindings** → **Add binding** → **KV namespace** → **Add binding**.
+   - **Variable name:** `DB` (genau so, Großbuchstaben)
+   - **KV namespace:** `jagd-test`
+   - **Add binding**.
+
+## 5. GitHub-Token hinterlegen
 
 Worker `jagd-test` → **Settings** → **Variables and Secrets** → **Add**:
-- Type: **Secret**
-- Name: **`GH_TOKEN`**
-- Value: der Token aus Schritt 1
-- Speichern / **Deploy**.
+- **Type:** *Secret*
+- **Variable name:** `GH_TOKEN`
+- **Value:** der Token aus Schritt 1
+- **Deploy** (bzw. Speichern).
 
-## 5. Claude-Schlüssel für die Foto-Auswertung
+## 6. Claude-Schlüssel für die Foto-Auswertung
 
-1. **console.anthropic.com** → **Settings → Workspaces** → neuen Workspace `Jagd Thuine` anlegen.
-2. Im Workspace unter **Limits** ein monatliches Ausgabenlimit setzen (z. B. 5 €) – das ist die feste Obergrenze.
-3. **API Keys** → **Create Key** im Workspace `Jagd Thuine` → Schlüssel kopieren.
-4. Worker `jagd-test` → **Settings** → **Variables and Secrets** → **Add** → Type **Secret**, Name **`ANTHROPIC_KEY`**, Value = der Schlüssel → Speichern / **Deploy**.
+1. **console.anthropic.com** → **Settings → Workspaces** → **Create Workspace** → Name `Jagd Thuine`.
+2. Im Workspace **Limits** → monatliches Ausgabenlimit setzen (z. B. 5 €) – das ist die feste Obergrenze.
+3. **API Keys** → **Create Key** → Workspace `Jagd Thuine` wählen, Name `Jagd-Test Server` → Schlüssel kopieren (beginnt mit `sk-ant-`).
+4. Cloudflare: Worker `jagd-test` → **Settings** → **Variables and Secrets** → **Add** → Type *Secret*, Name **`ANTHROPIC_KEY`**, Value = der Schlüssel → **Deploy**.
 
-Danach braucht kein Admin mehr einen eigenen Schlüssel auf dem Handy. Der Server erlaubt nur die Auswertung der Erlegerliste (festes Modell, begrenzte Antwortlänge, 20 Auswertungen pro Admin und Tag, 60 gesamt) und schreibt jede Auswertung ins Protokoll. Die Werte stehen oben in `worker.js` unter `ki:`.
+Danach braucht kein Admin mehr einen eigenen Schlüssel. Der Server erlaubt nur die Auswertung der Erlegerliste (Claude Opus 5.5, begrenzte Antwortlänge, 20 Auswertungen pro Admin und Tag, 60 gesamt) und schreibt jede Auswertung ins Protokoll.
 
-## 6. Prüfen und Adresse schicken
+## 7. Prüfen und Adresse schicken
 
-1. Die Adresse des Workers steht oben, z. B. `https://jagd-test.DEINNAME.workers.dev`.
-2. Im Browser öffnen: Es muss ein Text mit `"name":"Jagd Thuine – TEST"`, `"ersterNutzer":true` und `"ki":true` erscheinen.
-3. Die Adresse an Claude schicken – dann wird sie in den Test-Apps eingetragen.
+1. Die Adresse des Workers steht auf der Übersichtsseite des Workers unter *Domains & Routes*, z. B. `https://jagd-test.DEINNAME.workers.dev`.
+2. Im Browser öffnen. Es muss ein Text erscheinen mit:
+   - `"name":"Jagd Thuine – TEST"`
+   - `"ersterNutzer":true`
+   - `"ki":true`
+3. Erscheint `KV-Speicher „DB“ ist nicht verbunden` → Schritt 4 prüfen. Fehlt `"ki":true` → Schritt 6 prüfen.
+4. Die Adresse an Claude schicken – sie wird dann in beiden Test-Apps eingetragen.
 
-## 7. Erstes Konto = Haupt-Admin
+## 8. Erstes Konto = Haupt-Admin
 
-Sobald die Adresse eingetragen ist: Test-App öffnen → **Mit Konto anmelden** → Konto anlegen. **Das erste Konto wird automatisch Haupt-Admin** – also selbst als Erster registrieren. Danach einmal das Passwort der Jagdgemeinschaft eingeben; es wird dann im Server hinterlegt.
+Sobald Claude die Adresse eingetragen hat:
+1. <https://grunzelthuine.github.io/Jagd-Test/thuine/> öffnen (ggf. neu laden).
+2. **Mit Konto anmelden** → **Das erste Konto wird automatisch Haupt-Admin** – also selbst als Erster registrieren.
+3. Einmal das Passwort der Jagdgemeinschaft eingeben – es wird im Server hinterlegt.
+4. Dasselbe in der Hochsitze-Test-App (dort ist man schon angemeldet, nur das Passwort einmal eingeben).

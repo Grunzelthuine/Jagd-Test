@@ -1,0 +1,29 @@
+{
+  "name": "TEST Hochsitze",
+  "short_name": "TEST Hochsitze",
+  "description": "Hochsitze der Jagdgemeinschaft Thuine auf der Karte – mit Fotos, Panorama und Standortverlauf",
+  "lang": "de",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#e3e5cc",
+  "theme_color": "#1f4a24",
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

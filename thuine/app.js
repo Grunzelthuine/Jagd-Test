@@ -1,0 +1,3377 @@
+/* Jagd Thuine · App der Jagdgemeinschaft Thuine
+ * Daten liegen als data/strecke.json im GitHub-Repo.
+ * Lesen: öffentlich (GitHub-API bzw. Pages-Datei). Schreiben: nur mit GitHub-Token (Einstellungen).
+ * Foto-Auswertung: Anthropic-API mit eigenem Schlüssel (nur auf dem Gerät gespeichert).
+ */
+'use strict';
+
+/* Notfall: Falls beim Start etwas schiefgeht (z. B. alte index.html aus dem Zwischenspeicher),
+   wird ein Hinweis mit „App reparieren“ angezeigt statt einer leeren Seite. */
+function showRescue(msg) {
+  if (document.getElementById('rescue')) return;
+  // Nur zeigen, wenn die App nicht sichtbar gestartet ist (keine Fehlalarme im laufenden Betrieb)
+  try { if (document.querySelector('.start-tile, .day, .hero, #lock:not([hidden])')) return; } catch { /* egal */ }
+  const d = document.createElement('div');
+  d.id = 'rescue';
+  d.setAttribute('style', 'position:fixed;left:12px;right:12px;bottom:calc(env(safe-area-inset-bottom,0px) + 90px);z-index:99;padding:14px 16px;border-radius:14px;background:#f3dcc6;border:1px solid #e3bc9a;color:#5a2c10;font:14px/1.4 -apple-system,sans-serif;box-shadow:0 6px 20px rgba(0,0,0,.2)');
+  d.innerHTML = '<b>Die App konnte nicht richtig starten.</b><br>Meist hilft es, die App-Dateien neu zu laden.<br><small style="opacity:.7">' + String(msg || '').replace(/[<>&]/g, '') + '</small><br><button id="rescueBtn" style="margin-top:10px;min-height:42px;padding:8px 16px;border-radius:10px;border:0;background:#1f4a24;color:#f4f1de;font-weight:600">App reparieren &amp; neu laden</button>';
+  document.body.appendChild(d);
+  document.getElementById('rescueBtn').onclick = repairApp;
+}
+async function repairApp() {
+  try { const regs = await navigator.serviceWorker?.getRegistrations?.(); await Promise.all((regs || []).map(r => r.unregister())); } catch { /* egal */ }
+  try { const keys = await caches.keys(); await Promise.all(keys.map(k => caches.delete(k))); } catch { /* egal */ }
+  location.replace(location.pathname + '?r=' + Date.now()); // Daten & Einstellungen auf dem Gerät bleiben erhalten
+}
+window.addEventListener('error', e => showRescue(e.message));
+window.addEventListener('unhandledrejection', e => { if (!(e.reason && e.reason.name === 'AbortError')) showRescue(e.reason?.message || e.reason); });
+
+const APP_VERSION = '2.24.0';
+/* Einstellungen je Installation (config.js): Konten-Server, Test-Umgebung, abweichende Speicherorte */
+const CONF = self.JAGD_CFG || {};
+const LSP = CONF.lsPrefix || '';
+const LS_DATA = 'sb.data.v1';
+const LS_PENDING = 'sb.pending.v1';
+const LS_CFG = 'sb.cfg.v1';
+const LS_SCHALEN = 'sb.schalen.v1';
+const LS_SCHALEN_OPS = 'sb.schalen.ops.v1';
+const SCHALEN_PATH = CONF.schalenPath || 'schalenwild.json';
+/* Alte Damwild-Kategorien (bis 2.15) → neue 8 Kategorien */
+const KAT_ALIAS = { 'hirsch-3a': 'hirsch-3b', hirschkalb: 'kalb' };
+const FALLBACK_MODEL = 'claude-sonnet-4-6';
+
+/* ================= Hilfsfunktionen ================= */
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmt = n => (Math.round((n || 0) * 10) / 10).toLocaleString('de-DE', { maximumFractionDigits: 1 });
+const clone = o => JSON.parse(JSON.stringify(o));
+const slug = s => String(s).toLowerCase()
+  .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss')
+  .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'x';
+
+function lsGet(key, fallback) {
+  try { const v = localStorage.getItem(LSP + key); return v ? JSON.parse(v) : fallback; } catch { return fallback; }
+}
+function lsSet(key, val) {
+  try { val === undefined ? localStorage.removeItem(LSP + key) : localStorage.setItem(LSP + key, JSON.stringify(val)); } catch { /* egal */ }
+}
+
+function dateDE(iso, long = false) {
+  if (!iso) return '–';
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  return long
+    ? dt.toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit', year: 'numeric' })
+    : dt.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+/** Jagdjahr 1.4.–31.3. → "2025/26" */
+function seasonOf(iso) {
+  const [y, m] = iso.split('-').map(Number);
+  const start = m >= 4 ? y : y - 1;
+  return `${start}/${String((start + 1) % 100).padStart(2, '0')}`;
+}
+/** Jagdjahr eines Eintrags – auch ohne bekanntes Datum (dann gespeichertes season) */
+const recSeason = x => x.datum ? seasonOf(x.datum) : (x.season || seasonOf(todayISO()));
+const datumText = iso => iso ? dateDE(iso) : 'Datum unbekannt';
+/** Formular-Baustein: Datum oder „Datum unbekannt“ + Jagdjahr */
+function datumFeld(prefix, datum, season) {
+  const unbek = !datum;
+  const seasons = [...new Set([seasonOf(todayISO()), ...(state.data ? allSeasons() : []), season].filter(Boolean))].sort().reverse();
+  return `<div class="dt-field">
+    <label class="field" id="${prefix}DateWrap" ${unbek ? 'hidden' : ''}><span>Datum</span><input type="date" id="${prefix}Date" value="${esc(datum || todayISO())}"></label>
+    <label class="field" id="${prefix}SeasonWrap" ${unbek ? '' : 'hidden'}><span>Jagdjahr</span><select id="${prefix}Season">${seasons.map(x => `<option value="${x}" ${x === (season || state.season) ? 'selected' : ''}>${x}</option>`).join('')}</select></label>
+    <label class="dt-unk"><input type="checkbox" id="${prefix}Unk" ${unbek ? 'checked' : ''}> Datum unbekannt (später nachtragen)</label>
+  </div>`;
+}
+function wireDatumFeld(prefix) {
+  $(`#${prefix}Unk`)?.addEventListener('change', e => { $(`#${prefix}DateWrap`).hidden = e.target.checked; $(`#${prefix}SeasonWrap`).hidden = !e.target.checked; });
+}
+/** liefert { datum, season } oder null bei ungültigem Datum */
+function readDatumFeld(prefix) {
+  if ($(`#${prefix}Unk`)?.checked) return { datum: '', season: $(`#${prefix}Season`).value };
+  const datum = $(`#${prefix}Date`).value;
+  return /^\d{4}-\d{2}-\d{2}$/.test(datum) ? { datum, season: undefined } : null;
+}
+function todayISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function toast(msg, ms = 2600) {
+  const t = $('#toast');
+  t.textContent = msg; t.hidden = false;
+  clearTimeout(toast._t); toast._t = setTimeout(() => (t.hidden = true), ms);
+}
+const b64encodeUtf8 = str => {
+  const bytes = new TextEncoder().encode(str);
+  let bin = ''; for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+};
+/* ================= Verschlüsselung (AES-GCM, Schlüssel aus Passwort via PBKDF2) ================= */
+const LS_PW = 'sb.pw.v1';
+class NeedPassword extends Error {}
+const bytesToB64 = bytes => { let bin = ''; for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); return btoa(bin); };
+const b64ToBytes = b64 => Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+async function deriveKey(pw, salt, iter) {
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: iter, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+async function encryptJSON(obj, pw) {
+  const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12)), iter = 150000;
+  const key = await deriveKey(pw, salt, iter);
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(obj))));
+  return { enc: 'aes-gcm-v1', hinweis: 'Verschlüsselte Daten', iter, salt: bytesToB64(salt), iv: bytesToB64(iv), data: bytesToB64(ct) };
+}
+async function decryptJSON(env, pw) {
+  const key = await deriveKey(pw, b64ToBytes(env.salt), env.iter || 150000);
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64ToBytes(env.iv) }, key, b64ToBytes(env.data));
+  return JSON.parse(new TextDecoder().decode(pt));
+}
+/** Entschlüsselt, falls nötig. Wirft NeedPassword, wenn Passwort fehlt oder falsch ist. */
+async function openData(raw) {
+  if (!raw || !raw.enc) return raw;
+  if (!state.pw) throw new NeedPassword('fehlt');
+  try { return await decryptJSON(raw, state.pw); } catch { /* evtl. noch mit altem Passwort verschlüsselt (während eines Passwortwechsels) */ }
+  if (state.pwOld) { try { return await decryptJSON(raw, state.pwOld); } catch { /* weiter */ } }
+  throw new NeedPassword('falsch');
+}
+/** Zum Speichern: verschlüsselt, sobald ein Passwort gesetzt ist */
+const sealData = obj => (state.pw ? encryptJSON(obj, state.pw) : obj);
+
+/** Sperrbildschirm anlegen, falls die (evtl. ältere) index.html ihn nicht enthält */
+function ensureLockDom() {
+  if ($('#lock')) return;
+  document.body.insertAdjacentHTML('beforeend', `<div id="lock" class="lock" hidden>
+    <form class="lock-box" id="lockForm" autocomplete="off">
+      <img src="icons/logo.png" alt="Jagdgemeinschaft Thuine">
+      <h2>Jagd Thuine</h2>
+      <p id="lockMsg" class="sub">Bitte das Passwort der Jagdgemeinschaft eingeben.</p>
+      <input type="password" id="lockPw" placeholder="Passwort" autocomplete="current-password" aria-label="Passwort">
+      <button class="btn block" id="lockBtn" type="submit">Öffnen</button>
+      <p class="hint">Das Passwort wird nur einmal pro Gerät abgefragt.</p>
+      <button type="button" class="btn ghost" id="forgotPw">Passwort vergessen?</button>
+    </form>
+    <div class="lock-box" id="resetBox" hidden></div>
+  </div>`);
+}
+function ensureLockInstallBtn() {
+  const f = $('#lockForm');
+  if (!f || $('#lockInstall')) return;
+  f.insertAdjacentHTML('beforeend', '<button type="button" class="btn secondary lock-inst" id="lockInstall" hidden>📲 App auf dem Handy installieren</button>');
+  $('#lockInstall').addEventListener('click', startInstall);
+}
+/** Sperrbildschirm: „Mit Konto anmelden“ (und ggf. kein Passwort-Feld mehr) */
+function refreshLockKonto() {
+  const f = $('#lockForm'); if (!f || !window.Konto?.enabled()) return;
+  if (!$('#lockKonto')) {
+    $('#lockBtn').insertAdjacentHTML('afterend', '<button type="button" class="btn secondary block" id="lockKonto" style="margin-top:8px">👤 Mit Konto anmelden</button>');
+    $('#lockKonto').addEventListener('click', () => Konto.openLogin({ over: true }));
+  }
+  const nur = Konto.nurKonten();
+  $('#lockPw').hidden = nur; $('#lockBtn').hidden = nur;
+  if ($('#forgotPw')) $('#forgotPw').hidden = nur;
+  $$('#lockForm > .hint').forEach(h => { h.hidden = nur; });
+  $('#lockKonto').className = nur ? 'btn block' : 'btn secondary block';
+  if (nur && !$('#lockMsg').classList.contains('err')) $('#lockMsg').textContent = 'Bitte mit deinem Konto anmelden.';
+}
+function showLock(reason) {
+  const el = $('#lock');
+  if (!el) return;
+  setTimeout(refreshLockKonto, 0);
+  if (!el.hidden && reason !== 'falsch') return; // bereits gesperrt – Hinweis nicht überschreiben
+  el.hidden = false;
+  $('#lockMsg').textContent = reason === 'falsch' ? 'Passwort falsch oder geändert – bitte (neu) eingeben.' : 'Bitte das Passwort der Jagdgemeinschaft eingeben.';
+  $('#lockMsg').classList.toggle('err', reason === 'falsch');
+  $('#lockPw').value = '';
+  setTimeout(() => $('#lockPw').focus(), 50);
+}
+async function unlock(e) {
+  e?.preventDefault();
+  const pw = $('#lockPw').value;
+  if (!pw) return;
+  state.pw = pw;
+  $('#lockBtn').disabled = true;
+  try {
+    await load(true);
+    if (!$('#lock').hidden) return; // weiterhin gesperrt → Passwort falsch
+    lsSet(LS_PW, pw);
+    if (window.Konto?.isAdmin() && Konto.dataPw() !== pw) Konto.setDataPw(pw, true).catch(() => {});
+    loadSchalen();
+  } finally { $('#lockBtn').disabled = false; }
+}
+
+const b64decodeUtf8 = b64 => new TextDecoder().decode(Uint8Array.from(atob(b64.replace(/\s/g, '')), c => c.charCodeAt(0)));
+
+/* ================= Zustand ================= */
+const state = {
+  data: null,
+  season: null,
+  tab: 'start',
+  sha: null,
+  pending: !!lsGet(LS_PENDING, false),
+  cfg: Object.assign(defaultCfg(), lsGet(LS_CFG, {})),
+  schalen: normalizeSchalen(lsGet(LS_SCHALEN, null)),
+  schalenOps: lsGet(LS_SCHALEN_OPS, []),
+  pw: lsGet('sb.pw.v1', ''),
+};
+function normalizeSchalen(d) { d = d && typeof d === 'object' ? d : {}; d.version ||= 1; d.eintraege = Array.isArray(d.eintraege) ? d.eintraege : []; d.eintraege.forEach(x => { if (x.art === 'damm' && KAT_ALIAS[x.kat]) x.kat = KAT_ALIAS[x.kat]; }); return d; }
+
+function defaultCfg() {
+  let owner = '', repo = '';
+  if (location.hostname.endsWith('.github.io')) {
+    owner = location.hostname.split('.')[0];
+    repo = location.pathname.split('/').filter(Boolean)[0] || `${owner}.github.io`;
+  }
+  if (CONF.owner) owner = CONF.owner;
+  if (CONF.repo) repo = CONF.repo;
+  return { owner, repo, repo2: CONF.repo2 || (repo ? `${repo}-schalenwild` : ''), branch: 'main', path: 'data/strecke.json', token: '', apiKey: '', model: '', mode: '', ich: '' };
+}
+// Rollen: 'voll' = alles bearbeiten (Sebastian), 'schalen' = nur Reh- & Dammwild eintragen, '' = nur ansehen
+if (state.cfg.token && !state.cfg.mode) state.cfg.mode = 'voll';
+// Ohne vollen Zugang gilt immer der Standard-Speicherort (aus dem Link) – versehentliche Änderungen werden so repariert
+// In der Test-Umgebung immer die Test-Speicherorte (nie versehentlich in die echten Daten schreiben)
+if ((state.cfg.mode !== 'voll' && location.hostname.endsWith('.github.io')) || CONF.test) {
+  const d = defaultCfg(); Object.assign(state.cfg, { owner: d.owner, repo: d.repo, repo2: d.repo2, path: d.path });
+}
+/* Zugang: GitHub-Token auf dem Gerät (bisher) ODER Konto beim Konten-Server */
+const tokenAdmin = () => !!(state.cfg.mode === 'voll' && state.cfg.token && state.cfg.owner && state.cfg.repo);
+const viaKonto = () => !tokenAdmin() && !!window.Konto?.hatZugang();
+const isAdmin = () => tokenAdmin() || !!(window.Konto?.isAdmin() && state.cfg.owner && state.cfg.repo);
+const canSchalen = () => !!((((state.cfg.mode === 'voll' || state.cfg.mode === 'schalen') && state.cfg.token) || window.Konto?.isAdmin()) && state.cfg.owner && state.cfg.repo2);
+
+/* ================= Berechnungen ================= */
+const species = () => state.data.wildarten;
+const ptsMap = () => Object.fromEntries(species().map(w => [w.id, Number(w.punkte) || 0]));
+const shooterById = id => state.data.schuetzen.find(s => s.id === id);
+/** Anzeigename (voller Name), z. B. "Sebastian Bruns" */
+const shooterName = id => { const s = shooterById(id); return s ? (s.vollname || s.name) : id; };
+/** Kurzname wie auf der Erlegerliste, z. B. "Bruns, S." */
+const shortName = id => shooterById(id)?.name || id;
+const findShooter = txt => {
+  const t = String(txt || '').trim().toLowerCase();
+  return t ? state.data.schuetzen.find(s => s.id === t || s.name.toLowerCase() === t || (s.vollname || '').toLowerCase() === t) : null;
+};
+/** Sonderkönig-Text → voller Name, falls ein Schütze passt */
+const sonderName = txt => { const s = findShooter(txt); return s ? (s.vollname || s.name) : (txt || ''); };
+/** Gehört der Schütze in diesem Jagdjahr zur Gemeinschaft? */
+const isMember = (s, season) => s.aktiv !== false && (!s.ab || season >= s.ab) && (!s.bis || season <= s.bis);
+function seasonRange() {
+  const first = state.data.jagdtage.map(d => seasonOf(d.datum)).sort()[0] || seasonOf(todayISO());
+  const y0 = Number(first.slice(0, 4)), y1 = Number(seasonOf(todayISO()).slice(0, 4)) + 3;
+  const out = []; for (let y = y0; y <= y1; y++) out.push(`${y}/${String((y + 1) % 100).padStart(2, '0')}`);
+  return out;
+}
+
+function sumCounts(obj) { return Object.values(obj || {}).reduce((a, b) => a + (Number(b) || 0), 0); }
+function pointsOf(counts, pm = ptsMap()) {
+  return Object.entries(counts || {}).reduce((a, [k, v]) => a + (pm[k] || 0) * (Number(v) || 0), 0);
+}
+
+/** Jagdtag-Arten */
+const DAY_TYPES = { normal: 'Jagdtag', venslage: 'Jagd mit Venslage', treibjagd: 'Große Treibjagd' };
+const DAY_SHORT = { normal: 'Normal', venslage: 'mit Venslage', treibjagd: 'Gr. Treibjagd' };
+const isVenslage = d => d.art === 'venslage';
+const isTreibjagd = d => d.art === 'treibjagd';
+const hasGuests = d => isVenslage(d) || isTreibjagd(d);
+const GUEST_LABEL = { venslage: 'Venslage', treibjagd: 'Gast' };
+function addCounts(target, counts) { for (const [k, v] of Object.entries(counts || {})) if (v) target[k] = (target[k] || 0) + v; return target; }
+
+/** Auswertung eines Jagdtages.
+ * rows = Thuiner Schützen (+ bei Venslage die Venslager Jäger mit gast:true).
+ * perSpecies = Strecke für UNSEREN Streckenbericht: normal = Summe unserer Schützen,
+ *              Venslage = Zeile „Erlegt in Thuine“ (Revierstrecke).
+ * perSpeciesAll = Gesamtstrecke des Tages über alle Jäger. */
+function dayStats(day) {
+  const pm = ptsMap();
+  const ids = new Set([...Object.keys(day.strecke || {}), ...Object.keys(day.hund || {})]);
+  const mk = (id, name, erlegt, hund, gast) => ({ id, name, gast, erlegt, hund, punkte: pointsOf(erlegt, pm), stueck: sumCounts(erlegt) + sumCounts(hund) });
+  const own = [...ids].map(id => mk(id, shooterName(id), day.strecke?.[id] || {}, day.hund?.[id] || {}, false)).filter(r => r.stueck > 0);
+  const guests = hasGuests(day)
+    ? (day.gaeste || []).map((g, i) => Object.assign(mk(`gast:${i}`, `${g.name} (${GUEST_LABEL[day.art]})`, g.erlegt || {}, g.hund || {}, true), { plain: g.name, gastgeber: g.gastgeber || '' })).filter(r => r.stueck > 0)
+    : [];
+  const rows = [...own, ...guests];
+  const perSpeciesAll = {}; const hundAll = {};
+  for (const r of rows) { addCounts(perSpeciesAll, r.erlegt); addCounts(perSpeciesAll, r.hund); addCounts(hundAll, r.hund); }
+  let perSpecies, perSpeciesHund;
+  if (isVenslage(day)) { perSpecies = addCounts({}, day.revier); perSpeciesHund = {}; }
+  else { perSpecies = perSpeciesAll; perSpeciesHund = hundAll; }
+  const values = [...new Set(rows.map(r => r.punkte).filter(p => p > 0))].sort((a, b) => b - a);
+  const koenig = values[0] != null ? rows.filter(r => r.punkte === values[0]).map(r => r.id) : [];
+  const vize = values[1] != null ? rows.filter(r => r.punkte === values[1]).map(r => r.id) : [];
+  const byId = Object.fromEntries(rows.map(r => [r.id, r]));
+  const label = id => byId[id]?.name || shooterName(id);
+  const sortFn = (a, b) => b.punkte - a.punkte || b.stueck - a.stueck || a.name.localeCompare(b.name, 'de');
+  own.sort(sortFn); guests.sort(sortFn); rows.sort(sortFn);
+  return { rows, own, guests, perSpecies, perSpeciesHund, total: sumCounts(perSpecies), perSpeciesAll, totalAll: sumCounts(perSpeciesAll),
+    koenig, koenigPts: values[0] || 0, vize, vizePts: values[1] || 0, label };
+}
+const dayNames = (ds, ids) => ids.map(id => esc(ds.label(id))).join(', ');
+
+function seasonDays(season) {
+  return state.data.jagdtage.filter(d => seasonOf(d.datum) === season).sort((a, b) => a.datum.localeCompare(b.datum));
+}
+function seasonNachtraege(season) {
+  return (state.data.nachtraege || []).filter(n => recSeason(n) === season).sort((a, b) => (a.datum || '9').localeCompare(b.datum || '9'));
+}
+function allSeasons() {
+  const s = new Set([...state.data.jagdtage.map(d => seasonOf(d.datum)), ...[...(state.data.nachtraege || []), ...(state.schalen?.eintraege || [])].map(recSeason)]);
+  (state.data.dokumente || []).forEach(d => s.add(d.season));
+  s.add(seasonOf(todayISO()));
+  return [...s].sort().reverse();
+}
+
+/** Auswertung eines Jagdjahres */
+function seasonStats(season) {
+  const days = seasonDays(season);
+  const pm = ptsMap();
+  const per = {};
+  const get = id => (per[id] ||= { id, punkte: 0, stueck: 0, erlegt: {}, hund: {}, siege: 0, vize: 0, sonder: 0, tage: [] });
+  const perSpecies = {}; const perSpeciesHund = {};
+  for (const d of days) {
+    const ds = dayStats(d);
+    addCounts(perSpecies, ds.perSpecies); addCounts(perSpeciesHund, ds.perSpeciesHund);
+    for (const r of ds.own) { // nur Stammmannschaft zählt für den Jahres-Jagdkönig
+      const p = get(r.id);
+      p.punkte += r.punkte; p.stueck += r.stueck;
+      addCounts(p.erlegt, r.erlegt); addCounts(p.hund, r.hund);
+      p.tage.push({ datum: d.datum, art: d.art, erlegt: r.erlegt, hund: r.hund, punkte: r.punkte });
+    }
+    ds.koenig.filter(id => !id.startsWith('gast:')).forEach(id => get(id).siege++);
+    ds.vize.filter(id => !id.startsWith('gast:')).forEach(id => get(id).vize++);
+    const sk = (d.sonderkoenig || '').trim();
+    if (sk) { const s = findShooter(sk); if (s) get(s.id).sonder++; }
+  }
+  const ranking = Object.values(per).sort((a, b) =>
+    b.punkte - a.punkte || b.stueck - a.stueck || shooterName(a.id).localeCompare(shooterName(b.id), 'de'));
+  // Platzierung mit Gleichstand (gleiche Punkte = gleicher Platz)
+  let lastPts = null, lastRank = 0;
+  ranking.forEach((r, i) => { r.rank = r.punkte === lastPts ? lastRank : i + 1; lastPts = r.punkte; lastRank = r.rank; });
+  void pm;
+  // Nachträge (Wild außerhalb der Jagdtage): nur Strecke, keine Punkte
+  const perSpeciesTage = addCounts({}, perSpecies);
+  const nachtraege = seasonNachtraege(season);
+  const perNachtrag = {};
+  nachtraege.forEach(n => { perNachtrag[n.art] = (perNachtrag[n.art] || 0) + n.anzahl; });
+  addCounts(perSpecies, perNachtrag);
+  return { days, ranking, perSpecies, perSpeciesHund, total: sumCounts(perSpecies),
+    perSpeciesTage, totalTage: sumCounts(perSpeciesTage), nachtraege, perNachtrag, totalNachtrag: sumCounts(perNachtrag) };
+}
+
+/* ================= Daten laden / speichern ================= */
+const ghBase = () => viaKonto() ? Konto.ghBase() : 'https://api.github.com';
+function ghHeaders(auth) {
+  const h = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
+  if (viaKonto()) h.Authorization = `Bearer ${Konto.token()}`;
+  else if (auth && state.cfg.token) h.Authorization = `Bearer ${state.cfg.token}`;
+  return h;
+}
+/** Pfad im Repo (Test-Umgebung: Unterordner, z. B. „thuine/“) */
+const repoPath = (repo, path) => (CONF.base && repo === state.cfg.repo && !path.startsWith(CONF.base)) ? CONF.base + path : path;
+const encPath = p => p.split('/').map(encodeURIComponent).join('/');
+function ghUrl() {
+  const { owner, repo, path, branch } = state.cfg;
+  return `${ghBase()}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encPath(repoPath(repo, path))}?ref=${encodeURIComponent(branch || 'main')}`;
+}
+
+async function fetchRemote() {
+  const { owner, repo } = state.cfg;
+  // 1) GitHub-API (sofort aktuell nach dem Speichern)
+  if (owner && repo) {
+    try {
+      const r = await fetch(ghUrl() + `&t=${Date.now()}`, { headers: ghHeaders(true), cache: 'no-store' });
+      if (r.ok) {
+        const j = await r.json();
+        state.sha = j.sha;
+        return JSON.parse(b64decodeUtf8(j.content));
+      }
+      if (r.status === 401 && !viaKonto()) toast('GitHub-Token ungültig – bitte in den Einstellungen prüfen.', 5000);
+    } catch { /* weiter mit Fallback */ }
+  }
+  // 2) Datei direkt von GitHub Pages / lokal
+  const r = await fetch(`data/strecke.json?t=${Date.now()}`, { cache: 'no-store' });
+  if (!r.ok) throw new Error('Daten nicht erreichbar');
+  return r.json();
+}
+
+async function load(fromUnlock = false) {
+  const cached = lsGet(LS_DATA, null);
+  if (cached && !fromUnlock) { state.data = normalize(cached); render(); }
+  if (state.pending && cached) { showPendingBanner(); return; }
+  try {
+    const remote = normalize(await openData(await fetchRemote()));
+      if ($('#lock')) $('#lock').hidden = true;
+    state.data = remote; lsSet(LS_DATA, remote);
+    pushMerken();
+    render();
+    if (state.schalenFresh) migrateSchalen();
+  } catch (e) {
+    if (e instanceof NeedPassword) {
+      if (!fromUnlock && state.pw) { state.pw = ''; lsSet(LS_PW, undefined); }
+      // Angemeldetes Konto: aktuelles Passwort vom Server holen (z. B. nach Passwortwechsel)
+      if (window.Konto?.loggedIn() && Date.now() - (load._kt || 0) > 60e3) {
+        load._kt = Date.now();
+        await Konto.refresh();
+        if ($('#lock').hidden && state.pw && state.data) return;
+      }
+      showLock(e.message); return;
+    }
+    if (!cached) {
+      $('#view-tage').innerHTML = `<div class="card pad empty"><img src="icons/logo.png" alt=""><p>Keine Daten erreichbar. Bitte Internetverbindung prüfen.</p></div>`;
+    } else toast('Offline – zeige zuletzt geladenen Stand.');
+  }
+}
+
+/** Neue Wildart vor „Sonstiges“ einsortieren */
+function insertSpecies(d, w) {
+  const i = d.wildarten.findIndex(x => x.id === 'sonstiges');
+  i < 0 ? d.wildarten.push(w) : d.wildarten.splice(i, 0, w);
+}
+function addSpecies(name, punkte = 1) {
+  const n = name.trim();
+  const ex = species().find(w => w.name.toLowerCase() === n.toLowerCase());
+  if (ex) return ex.id;
+  let id = slug(n), i = 2;
+  while (species().some(w => w.id === id)) id = `${slug(n)}-${i++}`;
+  insertSpecies(state.data, { id, name: n, punkte: Number(punkte) || 0, eigen: true });
+  return id;
+}
+const speciesUsed = id => state.data.jagdtage.some(t =>
+    Object.values(t.strecke || {}).some(c => c[id]) || Object.values(t.hund || {}).some(c => c[id]) ||
+    (t.gaeste || []).some(g => g.erlegt?.[id]) || t.revier?.[id]) ||
+  (state.data.nachtraege || []).some(n => n.art === id);
+
+function normalize(d) {
+  d.wildarten ||= []; d.dokumente ||= []; d.termine ||= []; d.schuetzen ||= []; d.jagdtage ||= []; d.nachtraege ||= []; d.schalenwild ||= [];
+  if (!d.wildarten.some(w => w.id === 'kraehe')) insertSpecies(d, { id: 'kraehe', name: 'Krähe', punkte: 1 });
+  d.jagdtage.forEach(t => { t.art ||= 'normal'; t.strecke ||= {}; t.hund ||= {}; if (t.art !== 'normal') t.gaeste ||= []; if (t.art === 'venslage') t.revier ||= {}; t.sonderkoenig ||= ''; t.bemerkung ||= ''; t.id ||= t.datum; });
+  return d;
+}
+
+let saving = false;
+async function persist(message) {
+  state.data.stand = new Date().toISOString();
+  lsSet(LS_DATA, state.data);
+  state.pending = true; lsSet(LS_PENDING, true);
+  render();
+  return pushRemote(message);
+}
+
+async function pushRemote(message = 'Streckenbericht aktualisiert') {
+  if (!isAdmin()) { showPendingBanner(); return false; }
+  if (saving) return false;
+  saving = true;
+  showBanner('Speichere …', 'info');
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      // aktuellen sha holen
+      const g = await fetch(ghUrl() + `&t=${Date.now()}`, { headers: ghHeaders(true), cache: 'no-store' });
+      let sha;
+      if (g.ok) sha = (await g.json()).sha; else if (g.status !== 404) throw new Error(`GitHub ${g.status}`);
+      const body = { message, content: b64encodeUtf8(JSON.stringify(await sealData(state.data), null, 2) + '\n'), branch: state.cfg.branch || 'main' };
+      if (sha) body.sha = sha;
+      const { owner, repo, path } = state.cfg;
+      const r = await fetch(`${ghBase()}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encPath(repoPath(repo, path))}`, {
+        method: 'PUT', headers: { ...ghHeaders(true), 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      if (r.ok) {
+        state.sha = (await r.json()).content?.sha;
+        state.pending = false; lsSet(LS_PENDING, undefined);
+        hideBanner(); toast('Gespeichert ✓ – für alle sichtbar.');
+        pushNachSpeichern();
+        return true;
+      }
+      if (r.status === 409 || r.status === 422) continue; // sha veraltet → nochmal
+      if (r.status === 401 || r.status === 403) throw new Error(viaKonto() ? await serverFehler(r, 'Keine Schreibrechte') : 'Keine Schreibrechte (Token prüfen)');
+      throw new Error(`GitHub ${r.status}`);
+    }
+    throw new Error('Konflikt beim Speichern');
+  } catch (e) {
+    showPendingBanner(e.message);
+    return false;
+  } finally { saving = false; }
+}
+
+/* ================= Reh- & Dammwild: eigenes Repository ================= */
+function ghFileUrl(repo, path, ref = true, base = ghBase()) {
+  const { owner, branch } = state.cfg;
+  return `${base}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encPath(repoPath(repo, path))}` + (ref ? `?ref=${encodeURIComponent(branch || 'main')}` : '');
+}
+/** Fehlermeldung des Konten-Servers lesen (z. B. „Dafür fehlt dir das Recht“) */
+async function serverFehler(r, fallback) { try { const j = await r.clone().json(); return j.fehler || j.message || fallback; } catch { return fallback; } }
+/** Liest die Reh-/Dammwild-Datei; null-Inhalt = Datei existiert noch nicht */
+async function fetchSchalenRemote(auth) {
+  const { owner, repo2, branch } = state.cfg;
+  if (!owner || !repo2) throw new Error('kein Repository');
+  try {
+    const r = await fetch(ghFileUrl(repo2, SCHALEN_PATH) + `&t=${Date.now()}`, { headers: ghHeaders(auth), cache: 'no-store' });
+    if (r.status === 404) return { data: normalizeSchalen(null), sha: undefined };
+    if (r.ok) { const j = await r.json(); return { data: normalizeSchalen(await openData(JSON.parse(b64decodeUtf8(j.content)))), sha: j.sha }; }
+    if (auth) throw new Error(`GitHub ${r.status}`);
+  } catch (e) { if (auth || e instanceof NeedPassword) throw e; }
+  // Fallback ohne API-Limit (kann bis zu 5 Min. verzögert sein)
+  const r = await fetch(`https://raw.githubusercontent.com/${owner}/${repo2}/${branch || 'main'}/${repoPath(repo2, SCHALEN_PATH)}?t=${Date.now()}`, { cache: 'no-store' });
+  if (r.status === 404) return { data: normalizeSchalen(null) };
+  if (!r.ok) throw new Error('Schalenwild-Daten nicht erreichbar');
+  return { data: normalizeSchalen(await openData(await r.json())) };
+}
+function applySchalenOp(d, op) {
+  if (op.type === 'replace') { d.eintraege = clone(op.eintraege || []); return d; }
+  d.eintraege = d.eintraege.filter(x => x.id !== (op.rec?.id || op.id));
+  if (op.type === 'upsert') d.eintraege.push(op.rec);
+  return d;
+}
+async function loadSchalen() {
+  try {
+    const { data } = await fetchSchalenRemote(canSchalen());
+    state.schalen = data;
+    state.schalenOps.forEach(op => applySchalenOp(state.schalen, op)); // eigene, noch nicht hochgeladene Einträge
+    lsSet(LS_SCHALEN, state.schalen);
+    state.schalenFresh = true;
+    if (state.data) render();
+    if (state.schalenOps.length) pushSchalen();
+    else migrateSchalen();
+    migrateWildverteilung();
+  } catch (e) { if (e instanceof NeedPassword) showLock(e.message); /* sonst offline: Cache bleibt */ }
+}
+/** Einmalige Übernahme alter Reh-/Dammwild-Einträge aus der Hauptdatei (Version 1.5) */
+async function migrateSchalen() {
+  const old = state.data?.schalenwild;
+  if (!old?.length || !isAdmin() || state.pending || migrateSchalen.busy) return;
+  migrateSchalen.busy = true;
+  old.forEach(rec => { if (!state.schalen.eintraege.some(x => x.id === rec.id)) queueSchalenOp({ type: 'upsert', rec }); });
+  try { if (await pushSchalen('Reh-/Dammwild aus Hauptdatei übernommen')) { delete state.data.schalenwild; await persist('Reh-/Dammwild in eigenes Repository verschoben'); } }
+  finally { migrateSchalen.busy = false; }
+}
+function queueSchalenOp(op) {
+  state.schalenOps.push(op); lsSet(LS_SCHALEN_OPS, state.schalenOps);
+  applySchalenOp(state.schalen, op); lsSet(LS_SCHALEN, state.schalen);
+}
+let savingSchalen = false;
+async function pushSchalen(message = 'Schalenwild aktualisiert', force = false) {
+  if (!state.schalenOps.length && !force) return true;
+  if (!canSchalen()) { showSchalenBanner('Zugang fehlt – bitte in den Einstellungen eintragen.'); return false; }
+  if (savingSchalen) return false;
+  savingSchalen = true;
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const ops = [...state.schalenOps];
+      let data, sha;
+      if (ops.some(op => op.type === 'replace')) {
+        // Wiederherstellung: kompletter Stand wird ersetzt – alten Inhalt nicht lesen (evtl. altes Passwort)
+        const g = await fetch(ghFileUrl(state.cfg.repo2, SCHALEN_PATH) + `&t=${Date.now()}`, { headers: ghHeaders(true), cache: 'no-store' });
+        if (g.ok) sha = (await g.json()).sha; else if (g.status !== 404) throw new Error(`GitHub ${g.status}`);
+        data = normalizeSchalen(null);
+      } else {
+        // immer den neuesten Stand holen und nur die eigenen Änderungen darauf anwenden
+        ({ data, sha } = await fetchSchalenRemote(true));
+      }
+      const vorher = new Set(data.eintraege.map(x => x.id));
+      ops.forEach(op => applySchalenOp(data, op));
+      data.stand = new Date().toISOString();
+      const body = { message, content: b64encodeUtf8(JSON.stringify(await sealData(data), null, 2) + '\n'), branch: state.cfg.branch || 'main' };
+      if (sha) body.sha = sha;
+      const r = await fetch(ghFileUrl(state.cfg.repo2, SCHALEN_PATH, false), { method: 'PUT', headers: { ...ghHeaders(true), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      if (r.ok) {
+        state.schalen = data;
+        state.schalenOps = state.schalenOps.slice(ops.length); lsSet(LS_SCHALEN_OPS, state.schalenOps);
+        lsSet(LS_SCHALEN, state.schalen);
+        hideBanner(); toast('Gespeichert ✓ – für alle sichtbar.');
+        if (state.data) render();
+        if (!ops.some(op => op.type === 'replace')) pushDamwild(ops.filter(op => op.type === 'upsert' && op.rec?.art === 'damm' && !op.rec.fallwild && !vorher.has(op.rec.id)).map(op => op.rec));
+        return true;
+      }
+      if (r.status === 409 || r.status === 422) continue;
+      if (r.status === 401 || r.status === 403 || r.status === 404) throw new Error(viaKonto() ? await serverFehler(r, 'Keine Schreibrechte für Schalenwild') : 'Keine Schreibrechte für Schalenwild (Token prüfen)');
+      throw new Error(`GitHub ${r.status}`);
+    }
+    throw new Error('Konflikt beim Speichern – bitte erneut senden');
+  } catch (e) { showSchalenBanner(e.message); return false; }
+  finally { savingSchalen = false; }
+}
+function showSchalenBanner(err) {
+  showBanner(`<span>Schalenwild-Einträge noch nicht hochgeladen${err ? ` (${esc(err)})` : ''}.</span><button class="btn" id="retrySchalen">Erneut senden</button>`);
+  $('#retrySchalen')?.addEventListener('click', () => pushSchalen());
+}
+
+/* ================= Push-Benachrichtigungen (über den Konten-Server) =================
+   Nach dem Speichern vergleicht die App den alten und neuen Stand und schickt bei
+   neuen/geänderten Terminen, Damwild-Freigabe, Hirschjagd-Sperre und neuem Damwild eine Nachricht.
+   Senden dürfen nur Admins mit Konto. Texte ohne Treffpunkt, Leitung und Schützen. */
+const pushStand = d => d ? clone({ termine: d.termine || [], fg: d.damFreigabe || {}, sp: d.hirschSperre || null }) : null;
+state.pushBase = null;
+function pushMerken() { state.pushBase = pushStand(state.data); }
+const terminWann = t => `${dateDE(t.datum, true)}${t.zeit ? `, ${t.zeit} Uhr` : ''}`;
+function pushNachSpeichern() {
+  const alt = state.pushBase, neu = pushStand(state.data);
+  state.pushBase = neu;
+  if (!alt || !CONF.push || !window.Konto?.isAdmin()) return;
+  const msgs = [];
+  const vorher = new Map(alt.termine.map(t => [t.id, JSON.stringify(t)]));
+  const neuT = [], geaendertT = [];
+  for (const t of neu.termine) {
+    if (!t.datum || t.datum < todayISO()) continue;
+    if (!vorher.has(t.id)) neuT.push(t); else if (vorher.get(t.id) !== JSON.stringify(t)) geaendertT.push(t);
+  }
+  if (neuT.length > 2) msgs.push({ title: `${neuT.length} neue Termine`, body: neuT.slice(0, 3).map(t => `${terminTitel(t)} ${dateDE(t.datum)}`).join(' · ') + (neuT.length > 3 ? ' …' : ''), tag: 'termine' });
+  else neuT.forEach(t => msgs.push({ title: 'Neuer Termin', body: `${terminTitel(t)} – ${terminWann(t)}`, tag: 'termin-' + t.id }));
+  geaendertT.slice(0, 2).forEach(t => msgs.push({ title: 'Termin geändert', body: `${terminTitel(t)} – ${terminWann(t)}`, tag: 'termin-' + t.id }));
+  const keys = [...new Set([...Object.keys(alt.fg), ...Object.keys(neu.fg)])].filter(k => !!alt.fg[k] !== !!neu.fg[k]);
+  if (keys.length) msgs.push({ title: 'Damwild-Freigabe geändert', body: keys.map(k => `${fgItem(k)?.lbl || k}: ${neu.fg[k] ? 'frei' : 'nicht mehr frei'}`).join(' · '), tag: 'freigabe' });
+  if (JSON.stringify(alt.sp) !== JSON.stringify(neu.sp)) {
+    if (neu.sp && !alt.sp) msgs.push({ title: '⛔ Hirschjagd gesperrt', body: `Gesperrt bis einschließlich ${dateDE(neu.sp.bis, true)}.`, tag: 'sperre' });
+    else if (neu.sp) msgs.push({ title: '⛔ Sperre Hirschjagd geändert', body: `Jetzt gesperrt bis einschließlich ${dateDE(neu.sp.bis, true)}.`, tag: 'sperre' });
+    else msgs.push({ title: 'Sperre Hirschjagd aufgehoben', body: 'Die Hirschjagd ist wieder offen (im Rahmen der Freigabe).', tag: 'sperre' });
+  }
+  msgs.slice(0, 4).forEach(m => Konto.pushSend(m));
+}
+function pushDamwild(recs) {
+  if (!recs.length || !CONF.push || !window.Konto?.isAdmin()) return;
+  const plan = wildbretPlan();
+  recs.slice(0, 3).forEach(rec => Konto.pushSend({
+    title: 'Damwild erlegt',
+    body: `${katName('damm', rec.kat)}${rec.datum ? ` am ${dateDE(rec.datum)}` : ''} – Wildbret: ${gruppeLabel(plan.map[rec.id] || 'keine')}`,
+    tag: 'damm-' + rec.id,
+  }));
+}
+
+/* ================= Meldungen („Wild melden“) =================
+   Eigenes Repository <repo>-meldungen, Datei meldungen.json (mit dem Passwort verschlüsselt).
+   Der Melde-Zugang (Token nur für dieses Repo) liegt in der verschlüsselten Hauptdatei –
+   nur wer das Passwort kennt, kann melden. */
+const MELD_PATH = CONF.meldPath || 'meldungen.json';
+const meldRepo = () => CONF.meldRepo || state.data?.melde?.repo || (state.cfg.repo ? `${state.cfg.repo}-meldungen` : '');
+const meldToken = () => state.data?.melde?.token || '';
+const canMelden = () => !!((viaKonto() || meldToken()) && state.cfg.owner && meldRepo());
+state.meldungen = [];
+/* Mit Konto läuft die Meldung über den Konten-Server, sonst mit dem Melde-Token aus den Daten */
+const meldBase = () => viaKonto() ? Konto.ghBase() : 'https://api.github.com';
+function meldHeaders() { return { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', Authorization: `Bearer ${viaKonto() ? Konto.token() : meldToken()}` }; }
+async function fetchMeldungen() {
+  const r = await fetch(ghFileUrl(meldRepo(), MELD_PATH, true, meldBase()) + `&t=${Date.now()}`, { headers: meldHeaders(), cache: 'no-store' });
+  if (r.status === 404) return { list: [], sha: undefined };
+  if (!r.ok) throw new Error(`Meldungen: GitHub ${r.status}`);
+  const j = await r.json();
+  const d = await openData(JSON.parse(b64decodeUtf8(j.content)));
+  return { list: Array.isArray(d?.eintraege) ? d.eintraege : [], sha: j.sha };
+}
+/** Änderung sicher anwenden: neuesten Stand holen, Änderung drauf, speichern (bei Konflikt wiederholen) */
+async function changeMeldungen(fn, message) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { list, sha } = await fetchMeldungen();
+    const next = fn(list);
+    const body = { message, content: b64encodeUtf8(JSON.stringify(await sealData({ version: 1, eintraege: next }), null, 2) + '\n'), branch: state.cfg.branch || 'main' };
+    if (sha) body.sha = sha;
+    const r = await fetch(ghFileUrl(meldRepo(), MELD_PATH, false, meldBase()), { method: 'PUT', headers: { ...meldHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (r.ok) { state.meldungen = next; updateBadge(); return true; }
+    if (r.status === 409 || r.status === 422) continue;
+    throw new Error(r.status === 401 || r.status === 403 || r.status === 404 ? (viaKonto() ? await serverFehler(r, 'Kein Melde-Recht') : 'Melde-Zugang ungültig – bitte Sebastian Bescheid geben.') : `GitHub ${r.status}`);
+  }
+  throw new Error('Konflikt beim Speichern – bitte nochmal versuchen.');
+}
+async function loadMeldungen() {
+  if (!isAdmin() || !canMelden()) return;
+  try { state.meldungen = (await fetchMeldungen()).list; updateBadge(); if (state.tab === 'start') renderStart(); } catch { /* offline */ }
+}
+/** Zahl der offenen Meldungen am App-Symbol (nur beim Admin) */
+function updateBadge() {
+  if (!isAdmin() || !('setAppBadge' in navigator)) return;
+  const n = state.meldungen.length;
+  (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {});
+}
+/* Push über ntfy.sh: geheimer Kanal, gespeichert verschlüsselt in den Hauptdaten.
+   Einfache POST-Anfrage ohne eigene Header → kein CORS-Preflight. Inhalt ohne Namen. */
+const ntfyTopic = () => CONF.ntfy === false ? '' : (state.data?.melde?.ntfy || '');
+function newNtfyTopic() {
+  const a = crypto.getRandomValues(new Uint8Array(12));
+  return 'jg-thuine-' + Array.from(a, b => (b % 36).toString(36)).join('');
+}
+async function sendPush(topic, title, message) {
+  if (!topic) return false;
+  const q = new URLSearchParams({ title, tags: 'deer', click: location.origin + location.pathname });
+  try { const r = await fetch(`https://ntfy.sh/${encodeURIComponent(topic)}?${q}`, { method: 'POST', body: message }); return r.ok; }
+  catch { return false; }
+}
+const meldText = m => m.typ === 'schalen'
+  ? `${katName(m.art, m.kat)} (${SCHALEN[m.art]?.name || ''})${m.fallwild ? ' – Fallwild' : ''}`
+  : `${m.anzahl}× ${speciesName(m.art)}`;
+
+function openMelden() {
+  const members = state.data.schuetzen.filter(s => isMember(s, seasonOf(todayISO())));
+  const m = { von: state.cfg.ich && shooterById(state.cfg.ich) ? state.cfg.ich : '', datum: todayISO(), typ: 'nieder', art: 'fuchs', anzahl: 1, sArt: 'reh', kat: 'rehbock', fallwild: false, bemerkung: '' };
+  const draw = () => {
+    const body = `
+      <p class="hint">Deine Meldung geht direkt an Sebastian. Er prüft sie und trägt sie in die Strecke ein.</p>
+      <label class="field"><span>Wer meldet?</span><select id="mlVon"><option value="">Bitte wählen …</option>${members.map(s => `<option value="${esc(s.id)}" ${s.id === m.von ? 'selected' : ''}>${esc(s.vollname || s.name)}</option>`).join('')}</select></label>
+      ${datumFeld('ml', m.datum, m.season)}
+      <div class="seg seg2" role="radiogroup" aria-label="Bereich">
+        <button type="button" data-mltyp="nieder" class="${m.typ === 'nieder' ? 'on' : ''}">Niederwild</button>
+        <button type="button" data-mltyp="schalen" class="${m.typ === 'schalen' ? 'on' : ''}">Schalenwild</button>
+      </div>
+      ${m.typ === 'nieder' ? `
+        <label class="field"><span>Wildart</span><select id="mlArt">${species().map(w => `<option value="${w.id}" ${w.id === m.art ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select></label>
+        <div class="stepper big-stepper"><span class="lab">Anzahl</span><span class="ctl"><button type="button" id="mlMinus" aria-label="weniger">−</button><output id="mlCount">${m.anzahl}</output><button type="button" id="mlPlus" aria-label="mehr">+</button></span></div>`
+      : `
+        <div class="seg" role="radiogroup" aria-label="Wildart">${Object.entries(SCHALEN).map(([k, v]) => `<button type="button" data-mlsart="${k}" class="${m.sArt === k ? 'on' : ''}">${v.name}</button>`).join('')}</div>
+        <label class="field"><span>Kategorie</span><select id="mlKat">${SCHALEN[m.sArt].kat.map(([k, l]) => `<option value="${k}" ${k === m.kat ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+        <label class="check-row"><input type="checkbox" id="mlFall" ${m.fallwild ? 'checked' : ''}> <span><b>Fallwild</b><small>z. B. Verkehrsunfall</small></span></label>`}
+      <label class="field"><span>Bemerkung (optional)</span><input type="text" id="mlBem" value="${esc(m.bemerkung)}" placeholder="z. B. Ort, Uhrzeit, Ursache"></label>`;
+    openSheet('Wild melden', body, `<button class="btn secondary" data-close>Abbrechen</button><button class="btn" id="mlSend">Melden</button>`);
+    wireDatumFeld('ml');
+    const sync = () => {
+      m.von = $('#mlVon').value; m.bemerkung = $('#mlBem').value.trim();
+      const dt = readDatumFeld('ml'); if (dt) { m.datum = dt.datum; m.season = dt.season; }
+      if ($('#mlArt')) m.art = $('#mlArt').value;
+      if ($('#mlKat')) m.kat = $('#mlKat').value;
+      if ($('#mlFall')) m.fallwild = $('#mlFall').checked;
+    };
+    $$('[data-mltyp]').forEach(b => b.addEventListener('click', () => { sync(); m.typ = b.dataset.mltyp; draw(); }));
+    $$('[data-mlsart]').forEach(b => b.addEventListener('click', () => { sync(); if (m.sArt !== b.dataset.mlsart) { m.sArt = b.dataset.mlsart; m.kat = SCHALEN[m.sArt].kat[0][0]; } draw(); }));
+    $('#mlMinus')?.addEventListener('click', () => { m.anzahl = Math.max(1, m.anzahl - 1); $('#mlCount').textContent = m.anzahl; });
+    $('#mlPlus')?.addEventListener('click', () => { m.anzahl++; $('#mlCount').textContent = m.anzahl; });
+    $('#mlSend').addEventListener('click', async e => {
+      sync();
+      if (!m.von) { toast('Bitte auswählen, wer meldet.'); return; }
+      if (!readDatumFeld('ml')) { toast('Bitte ein Datum wählen oder „Datum unbekannt“ ankreuzen.'); return; }
+      if (!state.cfg.ich) { state.cfg.ich = m.von; lsSet(LS_CFG, state.cfg); }
+      const rec = { id: `m-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`, zeit: new Date().toISOString(), von: m.von, datum: m.datum, typ: m.typ };
+      if (!m.datum) rec.season = m.season;
+      if (m.typ === 'nieder') Object.assign(rec, { art: m.art, anzahl: m.anzahl });
+      else Object.assign(rec, { art: m.sArt, kat: m.kat, fallwild: !!m.fallwild });
+      if (m.bemerkung) rec.bemerkung = m.bemerkung;
+      const btn = e.currentTarget; btn.disabled = true; btn.textContent = 'Wird gesendet …';
+      try {
+        await changeMeldungen(list => [...list, rec], `Meldung: ${meldText(rec)} von ${shooterName(rec.von)}`);
+        closeSheet(); toast('Gemeldet ✓ – danke! Sebastian trägt es ein.', 4000);
+        sendPush(ntfyTopic(), 'Neue Wildmeldung', `${meldText(rec)}${rec.datum ? ` am ${dateDE(rec.datum)}` : ' (Datum unbekannt)'} – in der App übernehmen`);
+      } catch (err) { btn.disabled = false; btn.textContent = 'Melden'; toast(err.message || 'Senden fehlgeschlagen – Internet prüfen.', 4500); }
+    });
+  };
+  draw();
+}
+
+function openMeldungen() {
+  const list = [...state.meldungen].sort((a, b) => a.zeit.localeCompare(b.zeit));
+  const body = list.length ? `<div class="card"><ul class="nt-list">${list.map(m => `
+      <li>
+        <span class="nt-date ${m.datum ? '' : 'unk'}">${datumText(m.datum)}</span>
+        <span class="nt-what"><b>${esc(meldText(m))}</b><small>von ${esc(shooterName(m.von))}${m.bemerkung ? ` · ${esc(m.bemerkung)}` : ''}</small></span>
+      </li>
+      <li class="ml-actions"><button class="btn" data-mlok="${esc(m.id)}">Übernehmen</button><button class="btn danger" data-mlno="${esc(m.id)}">Verwerfen</button></li>`).join('')}</ul></div>
+      <p class="hint">„Übernehmen“ öffnet den Eintrag vorausgefüllt – prüfen und speichern, dann verschwindet die Meldung.</p>`
+    : '<p class="sub" style="text-align:center">Keine offenen Meldungen.</p>';
+  openSheet(`Meldungen (${list.length})`, body, '<button class="btn secondary" data-close>Schließen</button>');
+  $$('[data-mlok]').forEach(b => b.addEventListener('click', () => {
+    const m = list.find(x => x.id === b.dataset.mlok); if (!m) return;
+    state.pendingMeldung = m.id;
+    closeSheet();
+    if (m.typ === 'schalen') openSchalen(null, { datum: m.datum, season: m.season, art: m.art, kat: m.kat, fallwild: !!m.fallwild, schuetze: m.fallwild ? '' : m.von, ursache: m.fallwild ? (m.bemerkung || '') : '', bemerkung: m.fallwild ? '' : (m.bemerkung || ''), gemeldetVon: m.von });
+    else openNachtrag(null, { datum: m.datum, season: m.season, art: m.art, anzahl: m.anzahl, text: [shooterName(m.von), m.bemerkung].filter(Boolean).join(', ') });
+  }));
+  $$('[data-mlno]').forEach(b => b.addEventListener('click', async () => {
+    if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Wirklich?'; return; }
+    try { await changeMeldungen(l => l.filter(x => x.id !== b.dataset.mlno), 'Meldung verworfen'); openMeldungen(); renderStart(); }
+    catch (err) { toast(err.message, 4000); }
+  }));
+}
+/** Nach dem Speichern eines übernommenen Eintrags die Meldung entfernen */
+async function finishMeldung() {
+  const id = state.pendingMeldung; state.pendingMeldung = null;
+  if (!id) return;
+  try { await changeMeldungen(l => l.filter(x => x.id !== id), 'Meldung übernommen'); renderStart(); } catch { toast('Eintrag gespeichert – Meldung bitte manuell verwerfen.', 4000); }
+}
+
+/* ================= Banner ================= */
+function showBanner(html, kind = '') {
+  const b = $('#banner'); b.className = 'banner ' + kind; b.innerHTML = html; b.hidden = false;
+}
+function hideBanner() { $('#banner').hidden = true; }
+function showPendingBanner(err) {
+  if (!state.pending) return;
+  const msg = isAdmin()
+    ? `<span>Änderungen noch nicht hochgeladen${err ? ` (${esc(err)})` : ''}.</span><button class="btn" id="retryPush">Erneut senden</button>`
+    : `<span>Änderungen nur auf diesem Gerät gespeichert – GitHub-Zugang in den Einstellungen fehlt.</span><button class="btn" id="openCfg">Einstellungen</button>`;
+  showBanner(msg);
+  $('#retryPush')?.addEventListener('click', () => pushRemote('Streckenbericht aktualisiert'));
+  $('#openCfg')?.addEventListener('click', openSettings);
+}
+
+/* ================= Rendering ================= */
+function render() {
+  if (!state.data) return;
+  const seasons = allSeasons();
+  // Beim Öffnen immer das aktuelle Jagdjahr (1.4.–31.3.) – ältere Jahre über die Auswahl oben
+  if (!state.season || !seasons.includes(state.season)) state.season = seasonOf(todayISO());
+  const sel = $('#seasonSelect');
+  sel.innerHTML = seasons.map(s => `<option value="${s}" ${s === state.season ? 'selected' : ''}>${s}</option>`).join('');
+  renderTage(); renderStrecke(); renderKoenig(); renderSchalen(); renderStart();
+  if (state.tab === 'berichte') renderBerichte();
+  if (state.tab === 'termine') renderTermine();
+}
+
+function chipsFor(perSpecies, perHund = {}) {
+  return species().filter(w => perSpecies[w.id]).map(w =>
+    `<span class="chip ${perHund[w.id] ? 'dog' : ''}"><b>${perSpecies[w.id]}</b> ${esc(w.name)}${perHund[w.id] ? ` <small>(${perHund[w.id]}× Hund)</small>` : ''}</span>`).join('');
+}
+const names = ids => ids.map(id => esc(shooterName(id))).join(', ');
+
+function renderTage() {
+  const el = $('#view-tage');
+  const st = seasonStats(state.season);
+  const leader = st.ranking[0];
+  const leaders = leader ? st.ranking.filter(r => r.rank === 1) : [];
+  let html = `
+    <div class="stats">
+      <div class="card stat"><div class="v">${st.days.length}</div><div class="l">Jagdtage</div></div>
+      <div class="card stat"><div class="v">${st.total}</div><div class="l">Stück Strecke</div></div>
+      ${koenigGesperrt(state.season) && !isAdmin()
+        ? `<div class="card stat leader"><div class="v">🔒</div><div class="l">Jagdkönig noch geheim</div></div>`
+        : `<div class="card stat leader"><div class="v">${leader ? `<span class="crown">♛</span> ${names(leaders.map(l => l.id))}` : '–'}</div><div class="l">${leader ? `führt mit ${fmt(leader.punkte)} Pkt.` : 'Jagdkönig'}</div></div>`}
+    </div>`;
+  if (isAdmin()) {
+    html += `<div class="btn-row">
+      <button class="btn" id="btnPhoto">📷 Erlegerliste fotografieren</button>
+      <button class="btn secondary" id="btnManual">Manuell erfassen</button>
+    </div>`;
+  }
+  html += `<h2 class="section">Jagdtage ${esc(state.season)}</h2>`;
+  if (!st.days.length) {
+    html += `<div class="card pad empty"><img src="icons/logo.png" alt=""><p>Für das Jagdjahr ${esc(state.season)} ist noch kein Jagdtag erfasst.</p></div>`;
+  } else {
+    html += [...st.days].reverse().map(d => {
+      const ds = dayStats(d);
+      return `<button class="day" data-day="${esc(d.id)}">
+        <div class="day-top"><span class="day-date">${dateDE(d.datum, true)}</span><span class="day-total">${ds.total} Stück${isVenslage(d) ? ' in Thuine' : ''}</span></div>
+        ${isVenslage(d) ? `<div class="badge">Jagd mit Venslage · Gesamtstrecke ${ds.totalAll} Stück</div>` : ''}
+        ${isTreibjagd(d) ? `<div class="badge">Große Treibjagd · ${ds.guests.length} Gäste mit Strecke</div>` : ''}
+        <div class="chips">${chipsFor(ds.perSpecies, ds.perSpeciesHund) || '<span class="sub">keine Strecke</span>'}</div>
+        <div class="kings">
+          ${ds.koenig.length ? `<div><span class="k"><span class="crown">♛</span> Jagdkönig</span> ${dayNames(ds, ds.koenig)} · ${fmt(ds.koenigPts)} Pkt.</div>` : ''}
+          ${ds.vize.length ? `<div><span class="k">Vizekönig</span> ${dayNames(ds, ds.vize)} · ${fmt(ds.vizePts)} Pkt.</div>` : ''}
+          ${d.sonderkoenig ? `<div><span class="k">Sonderkönig</span> ${esc(sonderName(d.sonderkoenig))}</div>` : ''}
+        </div>
+      </button>`;
+    }).join('');
+  }
+  html += `<p class="foot-note">Stand: ${state.data.stand ? new Date(state.data.stand).toLocaleString('de-DE', { dateStyle: 'medium', timeStyle: 'short' }) : '–'} · v${APP_VERSION}</p>`;
+  el.innerHTML = html;
+  $$('.day', el).forEach(b => b.addEventListener('click', () => openDay(b.dataset.day)));
+  $('#btnPhoto')?.addEventListener('click', startPhoto);
+  $('#btnManual')?.addEventListener('click', () => openEditor(null));
+}
+
+function renderStrecke() {
+  const el = $('#view-strecke');
+  const st = seasonStats(state.season);
+  const hundTotal = sumCounts(st.perSpeciesHund);
+  let html = `
+    <div class="card hero">
+      <img src="icons/logo.png" alt="">
+      <div><div class="big">${st.total}</div><div class="lbl">Stück Gesamtstrecke<br>Jagdjahr ${esc(state.season)}</div></div>
+    </div>
+    <div class="species-grid">
+      ${species().filter(w => st.perSpecies[w.id]).map(w => {
+        const n = st.perSpecies[w.id] || 0;
+        const nt = st.perNachtrag[w.id] || 0;
+        return `<div class="card sp ${n ? '' : 'zero'}"><div class="n">${n}</div><div class="t">${esc(w.name)}</div>${nt ? `<div class="p">davon ${nt} außerh. Jagdtage</div>` : ''}</div>`;
+      }).join('')}
+    </div>
+    <h2 class="section">Außerhalb der Jagdtage erlegt ${esc(state.season)}</h2>
+    ${isAdmin() ? '<button class="btn block" id="btnNachtrag">+ Wild eintragen</button>' : ''}
+    ${st.nachtraege.length ? `<div class="card"><ul class="nt-list">${[...st.nachtraege].reverse().map(n => `
+      <li${isAdmin() ? ` data-nt="${esc(n.id)}" tabindex="0" role="button"` : ''}>
+        <span class="nt-date ${n.datum ? '' : 'unk'}">${datumText(n.datum)}</span>
+        <span class="nt-what"><b>${n.anzahl}</b> ${esc(speciesName(n.art))}${n.text ? `<small>${esc(n.text)}</small>` : ''}</span>
+        ${isAdmin() ? '<span class="nt-edit" aria-hidden="true">›</span>' : ''}
+      </li>`).join('')}</ul></div>` : '<p class="sub" style="text-align:center">In diesem Jagdjahr noch nichts außerhalb der Jagdtage erlegt.</p>'}`;
+
+  // Vergleich über alle Jagdjahre
+  const seasons = allSeasons().filter(s => seasonDays(s).length || seasonNachtraege(s).length);
+  if (seasons.length) {
+    const cols = species().filter(w => seasons.some(s => seasonStats(s).perSpecies[w.id]));
+    html += `<h2 class="section">Jagdjahre im Vergleich</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Jagdjahr</th><th>Tage</th>${cols.map(w => `<th>${esc(w.name)}</th>`).join('')}<th class="pts">Σ</th></tr></thead>
+      <tbody>${seasons.map(s => {
+        const x = seasonStats(s);
+        return `<tr><td>${s}</td><td>${x.days.length}</td>${cols.map(w => `<td class="${x.perSpecies[w.id] ? '' : 'zero'}">${x.perSpecies[w.id] || 0}</td>`).join('')}<td class="pts">${x.total}</td></tr>`;
+      }).join('')}</tbody>
+    </table></div>`;
+  }
+  el.innerHTML = html;
+  $('#btnNachtrag')?.addEventListener('click', () => openNachtrag(null));
+  $$('[data-nt]', el).forEach(li => li.addEventListener('click', () => openNachtrag(li.dataset.nt)));
+}
+
+const speciesName = id => species().find(w => w.id === id)?.name || id;
+
+/* ================= Reh- & Dammwild ================= */
+const SCHALEN = {
+  reh: { name: 'Rehwild', kat: [['rehbock', 'Rehbock'], ['ricke', 'Ricke'], ['schmalreh', 'Schmalreh'], ['kitz', 'Kitz']] },
+  damm: { name: 'Damwild', kat: [['alttier', 'Damtier'], ['kalb', 'Kalb'], ['schmaltier', 'Schmaltier'], ['schmalspiesser', 'Schmalspießer'],
+    ['spiesser', 'Spießer (3b)'], ['hirsch-3b', 'Hirsch 3b'], ['hirsch-2a', 'Hirsch 2a'], ['hirsch-2b', 'Hirsch 2b'], ['hirsch-1a', 'Hirsch 1a'], ['hirsch-1b', 'Hirsch 1b']] },
+  schwarz: { name: 'Schwarzwild', kat: [['sau', 'Sau'], ['keiler', 'Keiler'], ['ueberlaeufer', 'Überläufer'], ['frischling', 'Frischling']] },
+};
+const katName = (art, k) => SCHALEN[art]?.kat.find(x => x[0] === (KAT_ALIAS[k] || k))?.[1] || k;
+const MIT_GEMEINSCHAFT = ['reh', 'schwarz']; // Gemeinschaftsansitz möglich
+
+/* ---------- Freigabe Damwild: unsere Regelung + gesetzliche Jagdzeit (Niedersachsen) ----------
+   DVO-NJagdG § 3 (Stand 18.01.2021): Kälber 1.9.–31.1., Schmaltiere/Schmalspießer 1.4.–15.5. und 1.8.–31.1., Hirsche 1.8.–31.1.;
+   Alttiere nach Bundes-JagdzeitV 1.9.–31.1. */
+const DAM_JAGDZEIT = {
+  alttier: [['09-01', '01-31']], kalb: [['09-01', '01-31']],
+  schmaltier: [['04-01', '05-15'], ['08-01', '01-31']], schmalspiesser: [['04-01', '05-15'], ['08-01', '01-31']],
+  spiesser: [['08-01', '01-31']], 'hirsch-3b': [['08-01', '01-31']], 'hirsch-2a': [['08-01', '01-31']], 'hirsch-2b': [['08-01', '01-31']],
+  'hirsch-1a': [['08-01', '01-31']], 'hirsch-1b': [['08-01', '01-31']],
+};
+const DAM_FREI_LBL = { alttier: 'Damtiere', kalb: 'Kälber', schmaltier: 'Schmaltiere', schmalspiesser: 'Schmalspießer', spiesser: 'Spießer (3b)', 'hirsch-3b': 'Hirsch 3b', 'hirsch-2a': 'Hirsch 2a', 'hirsch-2b': 'Hirsch 2b', 'hirsch-1a': 'Hirsch 1a', 'hirsch-1b': 'Hirsch 1b' };
+/* Welches Wild in der Freigabe steht – Admin kann es unter Einstellungen ändern (data.damFreigabeKats) */
+const DAM_FG_STANDARD = ['alttier', 'kalb', 'schmaltier', 'spiesser', 'hirsch-3b', 'hirsch-2b', 'hirsch-1a', 'hirsch-1b'];
+const GANZJAHR = [['01-01', '12-31']];
+function fgKats() {
+  const l = state.data?.damFreigabeKats;
+  const arr = Array.isArray(l) ? l : DAM_FG_STANDARD.map(k => ({ k }));
+  return arr.filter(x => x && x.k).map(x => ({
+    k: x.k,
+    lbl: x.lbl || DAM_FREI_LBL[x.k] || katName('damm', x.k),
+    jz: (Array.isArray(x.jz) && x.jz.length ? x.jz : DAM_JAGDZEIT[x.k]) || GANZJAHR,
+    eigen: !DAM_JAGDZEIT[x.k],
+  }));
+}
+function fgItem(k) {
+  return fgKats().find(x => x.k === k) || (DAM_JAGDZEIT[k] ? { k, lbl: DAM_FREI_LBL[k] || katName('damm', k), jz: DAM_JAGDZEIT[k], eigen: false } : null);
+}
+const fgInListe = k => fgKats().some(x => x.k === k);
+const inJagdzeit = (ranges, iso) => { const md = iso.slice(5); return ranges.some(([a, b]) => a <= b ? md >= a && md <= b : md >= a || md <= b); };
+const mdText = md => { const [m, d] = md.split('-').map(Number); return `${d}.${m}.`; };
+const jagdzeitText = ranges => ranges.map(([a, b]) => `${mdText(a)}–${mdText(b)}`).join(' und ');
+function naechsterBeginn(ranges, iso) {
+  const y = +iso.slice(0, 4);
+  const cands = ranges.flatMap(([a]) => [`${y}-${a}`, `${y + 1}-${a}`]).filter(d => d > iso).sort();
+  return cands[0];
+}
+function damStatus(k, iso = todayISO()) {
+  const legal = inJagdzeit(fgItem(k)?.jz || GANZJAHR, iso);
+  const frei = !!state.data?.damFreigabe?.[k];
+  return { legal, frei, art: !legal ? 'gesetz' : frei ? 'frei' : 'regel' };
+}
+function freigabeStatusText(k, st, heute, lang = false) {
+  if (st.art === 'frei') return 'frei';
+  if (st.art === 'regel') return lang ? 'gesperrt · unsere Regelung' : 'gesperrt';
+  if (!lang) return 'Schonzeit';
+  return `Schonzeit${fgItem(k)?.eigen ? '' : ' · Gesetz'}, bis ${dateDE(naechsterBeginn(fgItem(k)?.jz || GANZJAHR, heute)).slice(0, 6).replace(/^(\d+)\.(\d+)\.$/, (m, d, mo) => { const dt = new Date(2000, +mo - 1, +d - 1); return `${dt.getDate()}.${dt.getMonth() + 1}.`; })}`;
+}
+/** Kompakte Übersicht für alle: farbige Kacheln je Kategorie */
+function freigabeCard() {
+  const heute = todayISO(), stand = state.data?.damFreigabeStand;
+  const liste = fgKats();
+  if (!liste.length && !isAdmin()) return '';
+  const chips = liste.map(({ k, lbl }) => {
+    const st = damStatus(k, heute);
+    return `<div class="fgc fg-${st.art}"><b>${esc(lbl)}</b><small>${freigabeStatusText(k, st, heute)}</small></div>`;
+  }).join('');
+  return `${liste.length ? `<div class="fgc-grid">${chips}</div>` : '<p class="hint">Kein Wild für die Freigabe ausgewählt (Einstellungen → Freigabe Damwild).</p>'}
+    <p class="hint fg-legend"><span class="fg-k fg-frei"></span>frei <span class="fg-k fg-regel"></span>gesperrt nach unserer Regelung <span class="fg-k fg-gesetz"></span>Schonzeit laut Jagdgesetz${stand ? ` · Stand ${dateDE(stand)}` : ''}</p>
+    ${isAdmin() ? '<button class="btn secondary block" id="fgEdit" style="margin-top:4px">Freigabe ändern</button>' : ''}`;
+}
+/** Admin: Freigabe je Kategorie umschalten */
+function openFreigabe() {
+  const heute = todayISO();
+  const draw = () => {
+    openSheet('Freigabe Damwild', `<p class="hint">„Schonzeit“ setzt die App automatisch nach dem Niedersächsischen Jagdgesetz. Deine Einstellung gilt, sobald die Jagdzeit läuft.</p>
+      <ul class="fg-list">${fgKats().map(({ k, lbl, jz }) => {
+        const st = damStatus(k, heute);
+        return `<li class="fg-${st.art}"><span class="fg-dot" aria-hidden="true"></span>
+          <span class="fg-name">${esc(lbl)}<small>${jz === GANZJAHR || (jz.length === 1 && jz[0][0] === '01-01' && jz[0][1] === '12-31') ? 'ganzjährig' : `Jagdzeit ${jagdzeitText(jz)}`}</small></span>
+          <span class="fg-st">${freigabeStatusText(k, st, heute, true)}${st.art === 'gesetz' ? ` <i>(danach ${st.frei ? 'frei' : 'gesperrt'})</i>` : ''}</span>
+          <button class="btn ${st.frei ? 'secondary' : ''} fg-btn" data-fg="${k}">${st.frei ? 'sperren' : 'freigeben'}</button></li>`;
+      }).join('')}</ul>`, '<button class="btn secondary" id="fgWild">Wild bearbeiten</button><button class="btn" data-close>Fertig</button>');
+    $('#fgWild')?.addEventListener('click', () => openFreigabeWild());
+    $$('[data-fg]').forEach(b => b.addEventListener('click', () => {
+      const k = b.dataset.fg;
+      state.data.damFreigabe = Object.assign({}, state.data.damFreigabe);
+      state.data.damFreigabe[k] = !state.data.damFreigabe[k];
+      state.data.damFreigabeStand = todayISO();
+      persist(`Freigabe Damwild: ${fgItem(k)?.lbl || k} ${state.data.damFreigabe[k] ? 'frei' : 'gesperrt'}`);
+      draw();
+    }));
+  };
+  draw();
+}
+/** Admin: welches Wild steht in der Freigabe (Reihenfolge, Namen, eigene Einträge) */
+const mdAus = t => { const m = String(t || '').trim().match(/^(\d{1,2})\.(\d{1,2})\.?$/); if (!m) return null; const d = +m[1], mo = +m[2]; if (mo < 1 || mo > 12 || d < 1 || d > 31) return null; return `${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`; };
+function openFreigabeWild() {
+  let liste = fgKats().map(x => ({ k: x.k, lbl: x.lbl, jz: x.eigen ? x.jz : null, eigen: x.eigen }));
+  const draw = () => {
+    const frei = SCHALEN.damm.kat.filter(([k]) => !liste.some(x => x.k === k));
+    openSheet('Freigabe Damwild – Wild', `<p class="hint">Hier legst du fest, welches Wild in der Freigabe-Übersicht steht. Namen kannst du direkt ändern. Die gesetzliche Jagdzeit setzt die App beim bekannten Damwild selbst.</p>
+      <ul class="fgw-list">${liste.map((x, i) => `<li>
+        <input type="text" class="fgw-lbl" data-i="${i}" value="${esc(x.lbl)}" aria-label="Name">
+        <small>${x.eigen ? (x.jz ? `eigener Eintrag · ${jagdzeitText(x.jz)}` : 'eigener Eintrag · ganzjährig') : `${esc(katName('damm', x.k))} · Jagdzeit ${jagdzeitText(DAM_JAGDZEIT[x.k])}`}</small>
+        <span class="fgw-btns"><button type="button" class="icon-btn sm" data-up="${i}" ${i ? '' : 'disabled'} aria-label="nach oben">↑</button><button type="button" class="icon-btn sm" data-down="${i}" ${i < liste.length - 1 ? '' : 'disabled'} aria-label="nach unten">↓</button><button type="button" class="icon-btn sm fgw-del" data-del="${i}" aria-label="entfernen">✕</button></span>
+      </li>`).join('') || '<li class="hint">Noch kein Wild ausgewählt.</li>'}</ul>
+      <h3 class="fgw-h">Hinzufügen</h3>
+      ${frei.length ? `<div class="fgw-add"><select id="fgwKat">${frei.map(([k, l]) => `<option value="${k}">${esc(l)}</option>`).join('')}</select><button type="button" class="btn secondary" id="fgwAdd">+ Hinzufügen</button></div>` : ''}
+      <details class="fgw-eigen"><summary>Eigenen Eintrag anlegen</summary>
+        <label class="field"><span>Name</span><input id="fgwName" type="text" placeholder="z. B. Hirsch 4. Kopf"></label>
+        <div class="fgw-jz"><label class="field"><span>Jagdzeit von</span><input id="fgwVon" type="text" inputmode="decimal" placeholder="1.8."></label><label class="field"><span>bis</span><input id="fgwBis" type="text" inputmode="decimal" placeholder="31.1."></label></div>
+        <p class="hint">Jagdzeit leer lassen = ganzjährig (keine Schonzeit-Anzeige).</p>
+        <button type="button" class="btn secondary block" id="fgwEigen">+ Eigenen Eintrag hinzufügen</button>
+      </details>
+      <button type="button" class="btn ghost block" id="fgwReset">Auf Standard zurücksetzen</button>`,
+    '<button class="btn secondary" data-close>Abbrechen</button><button class="btn" id="fgwSave">Speichern</button>');
+    const sync = () => $$('.fgw-lbl').forEach(inp => { liste[+inp.dataset.i].lbl = inp.value.trim(); });
+    $$('[data-up]').forEach(b => b.addEventListener('click', () => { sync(); const i = +b.dataset.up; [liste[i - 1], liste[i]] = [liste[i], liste[i - 1]]; draw(); }));
+    $$('[data-down]').forEach(b => b.addEventListener('click', () => { sync(); const i = +b.dataset.down; [liste[i + 1], liste[i]] = [liste[i], liste[i + 1]]; draw(); }));
+    $$('[data-del]').forEach(b => b.addEventListener('click', () => { sync(); liste.splice(+b.dataset.del, 1); draw(); }));
+    $('#fgwAdd')?.addEventListener('click', () => { sync(); const k = $('#fgwKat').value; liste.push({ k, lbl: DAM_FREI_LBL[k] || katName('damm', k), jz: null, eigen: false }); draw(); });
+    $('#fgwEigen').addEventListener('click', () => {
+      sync();
+      const name = $('#fgwName').value.trim();
+      if (!name) { toast('Bitte einen Namen eingeben.'); return; }
+      const vT = $('#fgwVon').value.trim(), bT = $('#fgwBis').value.trim();
+      let jz = null;
+      if (vT || bT) { const a = mdAus(vT), b = mdAus(bT); if (!a || !b) { toast('Jagdzeit bitte als Tag.Monat eingeben, z. B. 1.8. bis 31.1.', 4000); return; } jz = [[a, b]]; }
+      liste.push({ k: 'eigen-' + Date.now().toString(36), lbl: name, jz, eigen: true });
+      draw();
+    });
+    $('#fgwReset').addEventListener('click', () => { liste = DAM_FG_STANDARD.map(k => ({ k, lbl: DAM_FREI_LBL[k], jz: null, eigen: false })); draw(); });
+    $('#fgwSave').addEventListener('click', () => {
+      sync();
+      if (liste.some(x => !x.lbl)) { toast('Jeder Eintrag braucht einen Namen.'); return; }
+      state.data.damFreigabeKats = liste.map(x => {
+        const o = { k: x.k };
+        if (x.eigen || x.lbl !== (DAM_FREI_LBL[x.k] || katName('damm', x.k))) o.lbl = x.lbl;
+        if (x.eigen && x.jz) o.jz = x.jz;
+        return o;
+      });
+      persist('Freigabe Damwild: Wild-Auswahl geändert');
+      closeSheet();
+      renderSchalen();
+      toast('Freigabe-Liste gespeichert');
+    });
+  };
+  draw();
+}
+function wireFreigabe(el) {
+  $('#fgEdit', el)?.addEventListener('click', openFreigabe);
+}
+const FALLWILD_URSACHEN = ['Verkehrsunfall', 'Mähtod', 'Krankheit', 'Hund', 'Zaun', 'Unbekannt'];
+
+/* ================= Wildbret-Verteilung Damwild =================
+   Erlegtes Dammwild (kein Fallwild) geht der Reihe nach an feste Gruppen – fortlaufend über Jagdjahre.
+   Jeder Eintrag speichert seine Gruppe (rec.wildbret); ältere Einträge ohne Angabe werden aus der
+   Reihenfolge berechnet (Anker: data.wildverteilung.anker). 'keine' = Stück ohne Verteilung (zählt nicht). */
+const DEFAULT_GRUPPEN = [
+  ['bruendermann', 'dreishing-v'], ['bruns-m', 'koelker-w'], ['geerdes-h', 'gebbe-w'], ['geerdes-w', 'heskamp'], ['kall', 'kock'],
+  ['beckhuis', 'koelker-s'], ['schmees', 'N. N.'], ['schoo', 'gebbe-kh'], ['joerlemann', 'bruns-s'],
+].map((m, i) => ({ id: `g${i + 1}`, mitglieder: m }));
+const wv = () => state.data?.wildverteilung || { gruppen: DEFAULT_GRUPPEN };
+const wvGruppen = () => wv().gruppen?.length ? wv().gruppen : DEFAULT_GRUPPEN;
+const mitgliedName = m => shooterById(m) ? (shooterById(m).vollname || shooterById(m).name) : m;
+/** Nachname für die Sortierung: aus Kurzname „Geerdes, W.“ bzw. letztes Wort des vollen Namens; „N. N.“ immer zuletzt */
+const nachname = m => { const sh = shooterById(m); if (!sh) return '\uffff'; return (sh.name.includes(',') ? sh.name.split(',')[0] : (sh.vollname || sh.name).trim().split(/\s+/).pop()).toLowerCase(); };
+const sortMitglieder = list => [...list].sort((a, b) => nachname(a).localeCompare(nachname(b), 'de') || mitgliedName(a).localeCompare(mitgliedName(b), 'de'));
+function gruppeLabel(gid, kurz = false) {
+  if (gid === 'keine') return 'keine Verteilung';
+  const gs = wvGruppen(), i = gs.findIndex(g => g.id === gid);
+  if (i < 0) return 'Gruppe (gelöscht)';
+  const names = sortMitglieder(gs[i].mitglieder.filter(Boolean)).map(m => kurz && shooterById(m) ? shooterById(m).name : mitgliedName(m));
+  return `${i + 1}. ${names.join(' / ')}`;
+}
+const createdKey = x => { const m = /^sw-([0-9a-z]+)$/.exec(x.id || ''); return m ? parseInt(m[1], 36) : Date.parse(x.zeit || '') || 0; };
+const ordDatum = x => x.datum || (createdKey(x) ? new Date(createdKey(x)).toISOString().slice(0, 10) : '0000');
+const dammVerteilt = () => (state.schalen?.eintraege || []).filter(x => x.art === 'damm' && !x.fallwild)
+  .sort((a, b) => ordDatum(a).localeCompare(ordDatum(b)) || createdKey(a) - createdKey(b));
+/** Map Eintrag-ID → Gruppen-ID, dazu die als Nächstes dran befindliche Gruppe */
+function wildbretPlan() {
+  const gs = wvGruppen(), n = gs.length, list = dammVerteilt();
+  const idx = gid => gs.findIndex(g => g.id === gid);
+  const anker = wv().anker;
+  const fixed = list.map(x => x.wildbret || (anker && anker.id === x.id ? anker.gruppe : null));
+  const map = {};
+  const firstKnown = fixed.findIndex(f => f && f !== 'keine' && idx(f) >= 0);
+  if (firstKnown < 0) {
+    // noch nichts festgelegt: bei Gruppe 1 beginnen
+    let cur = -1;
+    list.forEach((x, i) => { if (fixed[i] === 'keine') { map[x.id] = 'keine'; return; } cur = (cur + 1) % n; map[x.id] = gs[cur].id; });
+    return { map, next: gs[(cur + 1) % n]?.id, list };
+  }
+  // rückwärts vor dem ersten bekannten Stück
+  let cur = idx(fixed[firstKnown]);
+  for (let i = firstKnown - 1; i >= 0; i--) {
+    if (fixed[i] === 'keine') { map[list[i].id] = 'keine'; continue; }
+    if (fixed[i] && idx(fixed[i]) >= 0) { cur = idx(fixed[i]); map[list[i].id] = fixed[i]; continue; }
+    cur = (cur - 1 + n) % n; map[list[i].id] = gs[cur].id;
+  }
+  // vorwärts ab dem ersten bekannten Stück
+  cur = idx(fixed[firstKnown]) - 1;
+  for (let i = firstKnown; i < list.length; i++) {
+    if (fixed[i] === 'keine') { map[list[i].id] = 'keine'; continue; }
+    if (fixed[i] && idx(fixed[i]) >= 0) cur = idx(fixed[i]); else cur = (cur + 1) % n;
+    map[list[i].id] = gs[cur].id;
+  }
+  return { map, next: gs[(cur + 1) % n].id, list };
+}
+/** Einmalig: letztes vorhandenes Stück Dammwild = Gruppe 4 (Geerdes W. / Heskamp) – Vorgabe Sebastian */
+async function migrateWildverteilung() {
+  if (!isAdmin() || !state.data || state.data.wildverteilung || !state.schalenFresh) return;
+  const list = dammVerteilt();
+  state.data.wildverteilung = { gruppen: clone(DEFAULT_GRUPPEN) };
+  if (list.length && !list.some(x => x.wildbret)) state.data.wildverteilung.anker = { id: list[list.length - 1].id, gruppe: 'g4' };
+  await persist('Wildbret-Verteilung Damwild eingerichtet');
+}
+/* ---------- Sperre Hirschjagd (nach Fehlabschuss, i. d. R. 4 Wochen) ---------- */
+const hirschSperre = () => { const sp = state.data?.hirschSperre; return sp?.bis && sp.bis >= todayISO() ? sp : null; };
+function addDaysISO(iso, n) { const [y, m, d] = iso.split('-').map(Number); const t = new Date(y, m - 1, d + n); return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`; }
+function sperreBanner() {
+  const sp = hirschSperre(); if (!sp) return '';
+  const [y, m, d] = sp.bis.split('-').map(Number), [ty, tm, td] = todayISO().split('-').map(Number);
+  const rest = Math.round((new Date(y, m - 1, d) - new Date(ty, tm - 1, td)) / 864e5) + 1;
+  return `<div class="sperre" role="alert">
+    <div class="sp-icon" aria-hidden="true">⛔</div>
+    <div><b class="sp-title">Hirschjagd gesperrt</b>
+      <span>bis einschließlich <b>${esc(dateDE(sp.bis, true))}</b> · noch ${rest} Tag${rest === 1 ? '' : 'e'}</span>
+      ${sp.grund ? `<small>${esc(sp.grund)}</small>` : ''}</div>
+  </div>`;
+}
+function openSperre() {
+  const sp = hirschSperre();
+  openSheet('Sperre Hirschjagd', `
+    <p class="hint">Bei einem Fehlabschuss ist die Hirschjagd gesperrt. Der Hinweis erscheint groß auf der Startseite und auf der Seite Reh &amp; Damm und verschwindet nach dem eingestellten Tag von selbst.</p>
+    <label class="field"><span>Gesperrt bis einschließlich</span><input type="date" id="spBis" value="${esc(sp?.bis || addDaysISO(todayISO(), 28))}"></label>
+    <div class="btn-row"><button type="button" class="btn secondary" id="sp4w">Ab heute 4 Wochen</button></div>
+    <label class="field"><span>Hinweis (optional)</span><input id="spGrund" value="${esc(sp?.grund || '')}" placeholder="z. B. Fehlabschuss am 12.10."></label>`,
+    `${sp ? '<button class="btn danger" id="spOff">Sperre aufheben</button>' : '<button class="btn secondary" data-close>Abbrechen</button>'}<button class="btn" id="spOk">${sp ? 'Speichern' : 'Sperre aktivieren'}</button>`);
+  $('#sp4w').addEventListener('click', () => { $('#spBis').value = addDaysISO(todayISO(), 28); });
+  $('#spOk').addEventListener('click', () => {
+    const bis = $('#spBis').value;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(bis) || bis < todayISO()) { toast('Bitte ein Datum ab heute wählen.'); return; }
+    state.data.hirschSperre = { bis, seit: sp?.seit || todayISO() };
+    const g = $('#spGrund').value.trim(); if (g) state.data.hirschSperre.grund = g;
+    closeSheet(); persist(`Hirschjagd gesperrt bis ${dateDE(bis)}`); render();
+  });
+  $('#spOff')?.addEventListener('click', e => {
+    const b = e.currentTarget;
+    if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Wirklich aufheben?'; return; }
+    delete state.data.hirschSperre;
+    closeSheet(); persist('Sperre Hirschjagd aufgehoben'); render();
+  });
+}
+
+/** Rehwild: Wildbret an den Schützen oder an die Jagdgemeinschaft */
+const schuetzeText = x => x.gemeinschaft ? 'Gemeinschaftsansitz' : shooterName(x.schuetze);
+const rehWildbretLabel = x => x.wildbret === 'jg' ? 'Jagdgemeinschaft' : x.wildbret === 'schuetze' ? (x.gemeinschaft ? 'Schütze' : `Schütze (${shooterName(x.schuetze)})`) : '';
+const wildbretText = (x, plan) => x.art === 'reh' ? rehWildbretLabel(x) : (plan.map[x.id] ? gruppeLabel(plan.map[x.id]) : '');
+
+function wildbretCard() {
+  const gs = wvGruppen(), plan = wildbretPlan();
+  const last = {}; // Gruppe → letztes Stück
+  plan.list.forEach(x => { const g = plan.map[x.id]; if (g && g !== 'keine') last[g] = x; });
+  return `<div class="wb-card">
+      <div class="wb-next"><span class="sub">Als Nächstes dran</span><b>${esc(gruppeLabel(plan.next))}</b></div>
+      <ol class="wb-list">${gs.map(g => `<li class="${g.id === plan.next ? 'next' : ''}">
+        <span class="wb-names">${esc(gruppeLabel(g.id))}</span>
+        <small>${last[g.id] ? `zuletzt ${datumText(last[g.id].datum)} · ${esc(katName('damm', last[g.id].kat))}` : '–'}</small></li>`).join('')}</ol>
+      ${isAdmin() ? '<button class="btn secondary block" id="wbEdit">Gruppen bearbeiten</button>' : ''}
+      <p class="hint">Erlegtes Damwild geht der Reihe nach an die Gruppen – unabhängig vom Schützen und über das Jagdjahr hinaus. Fallwild wird nicht verteilt.</p>
+    </div>`;
+}
+
+/** Zuletzt erlegtes Stück Damwild (kein Fallwild) und an wen das Wildbret geht – steht immer sichtbar oben */
+function aktuellesStueck() {
+  const plan = wildbretPlan(), akt = plan.list[plan.list.length - 1];
+  return akt ? `<div class="wb-next wb-akt wb-akt-top">
+        <span class="sub">Aktuelles Stück · ${esc(datumText(akt.datum))}</span>
+        <b>🥩 ${esc(gruppeLabel(plan.map[akt.id] || 'keine'))}</b>
+        <small>${esc(katName('damm', akt.kat))} · erlegt von ${esc(schuetzeText(akt) || 'unbekannt')}</small>
+      </div>` : '';
+}
+
+/* ---------- Aufklappbare Kacheln (Schalenwild) ----------
+   Offen/zu wird je Gerät gemerkt (nur Bequemlichkeit, kein gemeinsamer Stand). */
+const LS_KACHELN = 'sb.kacheln.v1';
+const kachelOffen = (key, standard) => { const m = lsGet(LS_KACHELN, {}); return key in m ? !!m[key] : standard; };
+function klappKachel(key, titel, meta, inhalt, standardOffen = false) {
+  return `<details class="kk" data-kk="${esc(key)}" ${kachelOffen(key, standardOffen) ? 'open' : ''}>
+    <summary><span class="kk-t">${titel}</span>${meta ? `<span class="kk-m">${meta}</span>` : ''}<span class="kk-chev" aria-hidden="true">›</span></summary>
+    <div class="kk-body">${inhalt}</div>
+  </details>`;
+}
+function wireKacheln(el) {
+  $$('details.kk', el).forEach(d => d.addEventListener('toggle', () => {
+    const m = lsGet(LS_KACHELN, {}); m[d.dataset.kk] = d.open; lsSet(LS_KACHELN, m);
+  }));
+}
+function openGruppen() {
+  const gs = clone(wvGruppen());
+  const opts = sel => `<option value="">–</option><option value="N. N." ${sel === 'N. N.' ? 'selected' : ''}>N. N. (noch offen)</option>` +
+    state.data.schuetzen.filter(s => isMember(s, seasonOf(todayISO())) || s.id === sel).map(s => `<option value="${esc(s.id)}" ${s.id === sel ? 'selected' : ''}>${esc(s.vollname || s.name)}</option>`).join('');
+  const draw = () => {
+    openSheet('Gruppen Wildbret-Verteilung', `
+      <p class="hint">Reihenfolge = Nummer. Die Verteilung läuft von der letzten bis zur ersten Gruppe im Kreis.</p>
+      ${gs.map((g, i) => `<div class="wb-edit"><span class="wb-no">${i + 1}.</span>
+        <select data-gm="${i}:0">${opts(g.mitglieder[0] || '')}</select><select data-gm="${i}:1">${opts(g.mitglieder[1] || '')}</select></div>`).join('')}
+      <div class="btn-row"><button class="btn secondary" id="gAdd">+ Gruppe</button>${gs.length > 1 ? '<button class="btn danger" id="gDel">Letzte entfernen</button>' : ''}</div>`,
+      `<button class="btn secondary" data-close>Abbrechen</button><button class="btn" id="gSave">Speichern</button>`);
+    const sync = () => $$('[data-gm]').forEach(s => { const [i, j] = s.dataset.gm.split(':').map(Number); gs[i].mitglieder[j] = s.value; });
+    $('#gAdd').addEventListener('click', () => { sync(); const max = Math.max(0, ...gs.map(g => +g.id.slice(1) || 0)); gs.push({ id: `g${max + 1}`, mitglieder: ['', ''] }); draw(); });
+    $('#gDel')?.addEventListener('click', () => { sync(); gs.pop(); draw(); });
+    $('#gSave').addEventListener('click', () => {
+      sync();
+      gs.forEach(g => { g.mitglieder = g.mitglieder.filter(Boolean); });
+      if (gs.some(g => !g.mitglieder.length)) { toast('Jede Gruppe braucht mindestens einen Namen.'); return; }
+      state.data.wildverteilung = Object.assign({}, state.data.wildverteilung, { gruppen: gs });
+      closeSheet(); persist('Gruppen Wildbret-Verteilung geändert'); renderSchalen();
+    });
+  };
+  draw();
+}
+
+function schalenStats(season) {
+  const list = (state.schalen?.eintraege || []).filter(x => recSeason(x) === season).sort((a, b) => (a.datum || '9').localeCompare(b.datum || '9'));
+  const cnt = {}; // art -> kat -> {erlegt, fallwild}
+  for (const x of list) {
+    const c = ((cnt[x.art] ||= {})[x.kat] ||= { erlegt: 0, fallwild: 0 });
+    x.fallwild ? c.fallwild++ : c.erlegt++;
+  }
+  const tot = art => Object.values(cnt[art] || {}).reduce((a, c) => ({ erlegt: a.erlegt + c.erlegt, fallwild: a.fallwild + c.fallwild }), { erlegt: 0, fallwild: 0 });
+  const perShooter = {};
+  for (const x of list.filter(x => !x.fallwild && x.schuetze)) {
+    const p = (perShooter[x.schuetze] ||= { reh: 0, damm: 0, schwarz: 0, list: [] });
+    p[x.art]++; p.list.push(x);
+  }
+  return { list, erlegt: list.filter(x => !x.fallwild), fallwild: list.filter(x => x.fallwild), cnt, tot, perShooter };
+}
+
+function renderSchalen() {
+  const el = $('#view-schalen');
+  if (!el || !state.data) return;
+  const art = state.schalenArt || 'reh', W = SCHALEN[art];
+  const st = schalenStats(state.season);
+  const plan = wildbretPlan();
+  const t = st.tot(art);
+  const rows = W.kat.map(([k, lbl]) => { const c = st.cnt[art]?.[k] || { erlegt: 0, fallwild: 0 }; return { lbl, ...c }; }).filter(r => r.erlegt + r.fallwild);
+  const catTable = rows.length ? `<div class="table-wrap"><table>
+      <thead><tr><th>${W.name}</th><th>Erlegt</th><th>Fallwild</th><th class="pts">Σ</th></tr></thead>
+      <tbody>${rows.map(r => `<tr><td>${esc(r.lbl)}</td><td class="${r.erlegt ? '' : 'zero'}">${r.erlegt}</td><td class="${r.fallwild ? '' : 'zero'}">${r.fallwild}</td><td class="pts">${r.erlegt + r.fallwild}</td></tr>`).join('')}</tbody>
+      <tfoot><tr><td>Gesamt</td><td>${t.erlegt}</td><td>${t.fallwild}</td><td>${t.erlegt + t.fallwild}</td></tr></tfoot>
+    </table></div>` : `<p class="sub wb-empty">${W.name}: in diesem Jagdjahr noch nichts.</p>`;
+  const item = x => `<li${canSchalen() ? ` data-sw="${esc(x.id)}" tabindex="0" role="button"` : ''}>
+      <span class="nt-date ${x.datum ? '' : 'unk'}">${datumText(x.datum)}</span>
+      <span class="nt-what"><b>${esc(katName(x.art, x.kat))}</b>
+        <small>${x.fallwild ? `Fallwild${x.ursache ? ` · ${esc(x.ursache)}` : ''}` : esc(schuetzeText(x))}${x.bemerkung ? ` · ${esc(x.bemerkung)}` : ''}${x.gemeldetVon ? ` · gemeldet von ${esc(shooterName(x.gemeldetVon))}` : ''}</small>
+        ${wildbretText(x, plan) ? `<small class="wb-tag">🥩 Wildbret: ${esc(wildbretText(x, plan))}</small>` : ''}</span>
+      ${canSchalen() ? '<span class="nt-edit" aria-hidden="true">›</span>' : ''}
+    </li>`;
+  const erlegt = st.erlegt.filter(x => x.art === art), fallwild = st.fallwild.filter(x => x.art === art);
+  const shooters = Object.entries(st.perShooter).filter(([, p]) => p[art]).sort((a, b) => b[1][art] - a[1][art] || shooterName(a[0]).localeCompare(shooterName(b[0]), 'de'));
+  const aktuell = state.season === seasonOf(todayISO());
+  const plural = (n, a, b) => `${n} ${n === 1 ? a : b}`;
+  const fgInhalt = art === 'damm' ? freigabeCard() : '';
+  const kacheln = [
+    art === 'damm' && aktuell ? klappKachel(`${art}-wildbret`, 'Wildbret-Verteilung', `dran: ${esc(gruppeLabel(plan.next, true).replace(/^\d+\.\s*/, ''))}`, wildbretCard()) : '',
+    klappKachel(`${art}-uebersicht`, `Übersicht ${esc(state.season)}`, 'nach Kategorie', catTable),
+    klappKachel(`${art}-erlegt`, 'Erlegt', plural(erlegt.length, 'Stück', 'Stück'),
+      erlegt.length ? `<ul class="nt-list">${[...erlegt].reverse().map(item).join('')}</ul>` : '<p class="sub kk-leer">Noch nichts erlegt in diesem Jagdjahr.</p>'),
+    klappKachel(`${art}-fallwild`, 'Fallwild', plural(fallwild.length, 'Stück', 'Stück'),
+      fallwild.length ? `<ul class="nt-list">${[...fallwild].reverse().map(item).join('')}</ul>` : '<p class="sub kk-leer">Kein Fallwild in diesem Jagdjahr.</p>'),
+    klappKachel(`${art}-schuetzen`, 'Je Schütze · was & wann', plural(shooters.length, 'Schütze', 'Schützen'),
+      shooters.length ? `<div class="table-wrap"><table>
+      <thead><tr><th>Schütze</th><th>Anzahl</th><th>Was / wann</th></tr></thead>
+      <tbody>${shooters.map(([id, p]) => `<tr><td>${esc(shooterName(id))}</td><td>${p[art]}</td><td class="wrap">${p.list.filter(x => x.art === art).map(x => `${esc(katName(x.art, x.kat))} (${x.datum ? dateDE(x.datum).slice(0, 6) : 'o. D.'})`).join(', ')}</td></tr>`).join('')}</tbody>
+    </table></div>` : '<p class="sub kk-leer">Noch kein Schütze mit Strecke in diesem Jagdjahr.</p>'),
+  ].filter(Boolean).join('');
+  el.innerHTML = `
+    ${art === 'damm' ? sperreBanner() : ''}
+    ${fgInhalt ? `<h2 class="section" style="margin-top:2px">Freigabe Damwild</h2>${fgInhalt}` : ''}
+    <h2 class="section" ${fgInhalt ? '' : 'style="margin-top:2px"'}>${W.name} ${esc(state.season)}</h2>
+    <div class="stats">
+      <div class="card stat"><div class="v">${t.erlegt}</div><div class="l">erlegt</div></div>
+      <div class="card stat"><div class="v">${t.fallwild}</div><div class="l">Fallwild</div></div>
+      <div class="card stat"><div class="v">${t.erlegt + t.fallwild}</div><div class="l">gesamt</div></div>
+    </div>
+    ${canSchalen() ? `<button class="btn block" id="btnSchalen">+ ${W.name} eintragen</button>` : ''}
+    ${art === 'damm' && isAdmin() ? `<button class="btn ${hirschSperre() ? 'danger' : 'secondary'} block" id="btnSperre" style="margin-top:8px">${hirschSperre() ? '⛔ Sperre Hirschjagd ändern / aufheben' : 'Hirschjagd sperren (Fehlabschuss)'}</button>` : ''}
+    ${state.schalenOps.length ? `<div class="alert">${state.schalenOps.length} Änderung(en) noch nicht hochgeladen.</div>` : ''}
+    ${art === 'damm' && aktuell ? aktuellesStueck() : ''}
+    <div class="kk-stack">${kacheln}</div>`;
+  wireKacheln(el);
+  $('#btnSchalen')?.addEventListener('click', () => openSchalen(null, { art, kat: W.kat[0][0] }));
+  $('#wbEdit')?.addEventListener('click', openGruppen);
+  $('#btnSperre')?.addEventListener('click', openSperre);
+  wireFreigabe(el);
+  $$('[data-sw]', el).forEach(li => li.addEventListener('click', () => openSchalen(li.dataset.sw)));
+}
+
+function openSchalen(id, prefill = null) {
+  const ex = id ? state.schalen.eintraege.find(x => x.id === id) : null;
+  const ich = state.cfg.ich && shooterById(state.cfg.ich) ? state.cfg.ich : '';
+  const x = ex ? clone(ex) : Object.assign({ id: null, datum: todayISO(), art: 'reh', kat: 'rehbock', fallwild: false, schuetze: ich, ursache: '', bemerkung: '' }, prefill || {});
+  const planAtOpen = wildbretPlan();
+  if (x.art === 'damm' && KAT_ALIAS[x.kat]) x.kat = KAT_ALIAS[x.kat];
+  const wbDefault = () => x.art === 'reh' ? (x.gemeinschaft ? 'jg' : 'schuetze') : x.art === 'damm' ? planAtOpen.next : '';
+  if (!x.wildbret || (x.art === 'damm' && ['schuetze', 'jg'].includes(x.wildbret)) || (x.art !== 'damm' && /^g\d+$|^keine$/.test(x.wildbret))) x.wildbret = x.art === 'reh' ? (ex ? '' : wbDefault()) : x.art === 'damm' ? ((ex && planAtOpen.map[ex.id]) || planAtOpen.next) : '';
+  const draw = () => {
+    const members = state.data.schuetzen.filter(s => isMember(s, x.datum ? seasonOf(x.datum) : (x.season || seasonOf(todayISO()))) || s.id === x.schuetze);
+    const body = `
+      ${datumFeld('sw', x.datum, x.season)}
+      <div class="seg" role="radiogroup" aria-label="Wildart">
+        ${Object.entries(SCHALEN).map(([k, v]) => `<button type="button" role="radio" aria-checked="${x.art === k}" class="${x.art === k ? 'on' : ''}" data-swart="${k}">${v.name}</button>`).join('')}
+      </div>
+      <label class="field"><span>Kategorie</span><select id="swKat">${SCHALEN[x.art].kat.map(([k, l]) => `<option value="${k}" ${k === x.kat ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      ${x.art === 'damm' && !x.fallwild && !fgInListe(x.kat) ? `<div class="alert fg-warn">⚠️ ${esc(katName('damm', x.kat))} steht nicht in der Freigabe – bitte trotzdem korrekt eintragen (z. B. Fehlabschuss).</div>` : ''}
+      ${x.art === 'damm' && !x.fallwild && fgInListe(x.kat) && damStatus(x.kat, x.datum || todayISO()).art !== 'frei' ? `<div class="alert fg-warn">⚠️ ${esc(fgItem(x.kat).lbl)}: derzeit ${damStatus(x.kat, x.datum || todayISO()).art === 'gesetz' ? 'Schonzeit laut Jagdgesetz' : 'gesperrt nach unserer Regelung'}.</div>` : ''}
+      <label class="check-row"><input type="checkbox" id="swFall" ${x.fallwild ? 'checked' : ''}> <span><b>Fallwild</b><small>z. B. Verkehrsunfall – ohne Schützen</small></span></label>
+      ${x.fallwild
+        ? `<label class="field"><span>Ursache (optional)</span><input type="text" id="swUrs" list="swUrsList" value="${esc(x.ursache || '')}" placeholder="z. B. Verkehrsunfall"><datalist id="swUrsList">${FALLWILD_URSACHEN.map(u => `<option value="${u}">`).join('')}</datalist></label>`
+        : `<label class="field"><span>Schütze</span><select id="swSchuetze"><option value="">Schütze wählen …</option>${MIT_GEMEINSCHAFT.includes(x.art) ? `<option value="__gemein" ${x.gemeinschaft ? 'selected' : ''}>Gemeinschaftsansitz (Schütze unbekannt)</option>` : ''}${members.map(s => `<option value="${esc(s.id)}" ${s.id === x.schuetze && !x.gemeinschaft ? 'selected' : ''}>${esc(s.vollname || s.name)}</option>`).join('')}</select></label>`}
+      ${x.art === 'reh' && !x.fallwild ? `<div class="field wb-field"><span>🥩 Wildbret geht an</span>
+        <div class="seg seg2" role="radiogroup" aria-label="Wildbret">
+          <button type="button" data-rwb="schuetze" class="${x.wildbret === 'schuetze' ? 'on' : ''}">den Schützen</button>
+          <button type="button" data-rwb="jg" class="${x.wildbret === 'jg' ? 'on' : ''}">die Jagdgemeinschaft</button>
+        </div></div>` : ''}
+      ${x.art === 'damm' && !x.fallwild ? `<label class="field wb-field"><span>🥩 Wildbret geht an${!ex ? ' (der Reihe nach)' : ''}</span><select id="swWb">
+        ${wvGruppen().map(g => `<option value="${g.id}" ${g.id === x.wildbret ? 'selected' : ''}>${esc(gruppeLabel(g.id))}${g.id === planAtOpen.next && !ex ? ' – ist dran' : ''}</option>`).join('')}
+        <option value="keine" ${x.wildbret === 'keine' ? 'selected' : ''}>– keine Verteilung (z. B. nicht verwertbar) –</option></select></label>` : ''}
+      <label class="field"><span>Bemerkung (optional)</span><input type="text" id="swBem" value="${esc(x.bemerkung || '')}" placeholder="z. B. Ort, Gewicht"></label>`;
+    const foot = ex ? `<button class="btn danger" id="swDel">Löschen</button><button class="btn" id="swSave">Speichern</button>`
+                    : `<button class="btn secondary" data-close>Abbrechen</button><button class="btn" id="swSave">Speichern</button>`;
+    openSheet(ex ? 'Eintrag bearbeiten' : `${SCHALEN[x.art].name} eintragen`, body, foot);
+    const sync = () => {
+      const dt = readDatumFeld('sw'); if (dt) { x.datum = dt.datum; x.season = dt.season; }
+      x.kat = $('#swKat').value;
+      x.bemerkung = $('#swBem').value.trim();
+      if ($('#swSchuetze')) { const v = $('#swSchuetze').value; x.gemeinschaft = v === '__gemein'; x.schuetze = x.gemeinschaft ? '' : v; }
+      if ($('#swUrs')) x.ursache = $('#swUrs').value.trim();
+      if ($('#swWb')) x.wildbret = $('#swWb').value;
+    };
+    $$('[data-swart]').forEach(b => b.addEventListener('click', () => { sync(); if (x.art !== b.dataset.swart) { x.art = b.dataset.swart; x.kat = SCHALEN[x.art].kat[0][0]; if (!MIT_GEMEINSCHAFT.includes(x.art) && x.gemeinschaft) { x.gemeinschaft = false; x.schuetze = ''; } x.wildbret = wbDefault(); } draw(); }));
+    $('#swKat').addEventListener('change', () => { sync(); if (x.art === 'damm') draw(); });
+    $$('[data-rwb]').forEach(b => b.addEventListener('click', () => { sync(); x.wildbret = b.dataset.rwb; draw(); }));
+    $('#swFall').addEventListener('change', e => { sync(); x.fallwild = e.target.checked; draw(); });
+    $('#swDate').addEventListener('change', () => { sync(); draw(); });
+    $('#swUnk').addEventListener('change', () => { sync(); draw(); });
+    $('#swSchuetze')?.addEventListener('change', () => { const was = x.gemeinschaft; sync(); if (x.art === 'reh' && x.gemeinschaft !== was) { x.wildbret = x.gemeinschaft ? 'jg' : 'schuetze'; draw(); } });
+    $('#swSave').addEventListener('click', () => {
+      sync();
+      if (!readDatumFeld('sw')) { toast('Bitte ein Datum wählen oder „Datum unbekannt“ ankreuzen.'); return; }
+      if (!x.fallwild && !x.schuetze && !(MIT_GEMEINSCHAFT.includes(x.art) && x.gemeinschaft)) { toast('Bitte den Schützen wählen oder „Fallwild“ ankreuzen.'); return; }
+      const rec = { id: ex?.id || `sw-${Date.now().toString(36)}`, datum: x.datum, art: x.art, kat: x.kat, fallwild: !!x.fallwild };
+      if (!x.datum) rec.season = x.season;
+      if (x.fallwild) { if (x.ursache) rec.ursache = x.ursache; }
+      else if (MIT_GEMEINSCHAFT.includes(x.art) && x.gemeinschaft) { rec.gemeinschaft = true; rec.schuetze = ''; }
+      else rec.schuetze = x.schuetze;
+      if (x.bemerkung) rec.bemerkung = x.bemerkung;
+      if (!rec.fallwild && x.wildbret && (rec.art === 'damm' ? !['schuetze', 'jg'].includes(x.wildbret) : rec.art === 'reh' && ['schuetze', 'jg'].includes(x.wildbret))) rec.wildbret = x.wildbret;
+      if (x.gemeldetVon) rec.gemeldetVon = x.gemeldetVon;
+      rec.von = ex?.von || ich || undefined;
+      if (ex && ich && ich !== ex.von) rec.geaendertVon = ich;
+      rec.zeit = new Date().toISOString();
+      queueSchalenOp({ type: 'upsert', rec });
+      state.season = recSeason(rec);
+      state.schalenArt = rec.art;
+      closeSheet(); switchTab('schalen'); render();
+      pushSchalen(`${SCHALEN[rec.art].name}: ${katName(rec.art, rec.kat)}${rec.fallwild ? ' (Fallwild)' : ''} ${datumText(rec.datum)}${ich ? ` – eingetragen von ${shooterName(ich)}` : ''}`).then(ok => { if (ok) finishMeldung(); });
+    });
+    $('#swDel')?.addEventListener('click', e => {
+      const b = e.currentTarget;
+      if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Wirklich löschen?'; return; }
+      queueSchalenOp({ type: 'delete', id: ex.id });
+      closeSheet(); render();
+      pushSchalen(`Schalenwild-Eintrag gelöscht${ich ? ` von ${shooterName(ich)}` : ''}`);
+    });
+  };
+  draw();
+}
+
+/* ================= Nachträge ================= */
+function openNachtrag(id, prefill = null) {
+  const ex = id ? state.data.nachtraege.find(n => n.id === id) : null;
+  const n = ex ? clone(ex) : Object.assign({ id: null, datum: todayISO(), art: 'taube', anzahl: 1, text: '' }, prefill || {});
+  const body = `
+    <p class="hint">Zählt zur Strecke, aber nicht zum Jagdkönig.</p>
+    ${datumFeld('nt', n.datum, n.season)}
+    <label class="field"><span>Wildart</span>
+      <select id="ntArt">${species().map(w => `<option value="${w.id}" ${w.id === n.art ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}<option value="__neu">+ Neue Wildart …</option></select>
+    </label>
+    <div class="card pad" id="ntNew" hidden>
+      <div class="grid2">
+        <label class="field"><span>Name der neuen Wildart</span><input type="text" id="ntNewName" placeholder="z. B. Elster"></label>
+        <label class="field"><span>Punkte (falls sie mal an einem Jagdtag fällt)</span><input type="number" id="ntNewPts" step="0.5" min="0" value="1"></label>
+      </div>
+    </div>
+    <div class="stepper big-stepper"><span class="lab">Anzahl</span><span class="ctl">
+      <button type="button" id="ntMinus" aria-label="weniger">−</button><output id="ntCount">${n.anzahl}</output><button type="button" id="ntPlus" aria-label="mehr">+</button>
+    </span></div>
+    <label class="field"><span>Erlegt von / Bemerkung (optional)</span><input type="text" id="ntText" value="${esc(n.text)}" placeholder="z. B. Sebastian Bruns, Taubenjagd"></label>`;
+  const foot = ex ? `<button class="btn danger" id="ntDel">Löschen</button><button class="btn" id="ntSave">Speichern</button>`
+                  : `<button class="btn secondary" data-close>Abbrechen</button><button class="btn" id="ntSave">Speichern</button>`;
+  openSheet(ex ? 'Eintrag bearbeiten' : 'Außerhalb der Jagdtage erlegt', body, foot);
+  wireDatumFeld('nt');
+  let count = n.anzahl;
+  const upd = () => ($('#ntCount').textContent = count);
+  $('#ntMinus').addEventListener('click', () => { count = Math.max(1, count - 1); upd(); });
+  $('#ntPlus').addEventListener('click', () => { count++; upd(); });
+  $('#ntArt').addEventListener('change', e => { $('#ntNew').hidden = e.target.value !== '__neu'; if (!$('#ntNew').hidden) $('#ntNewName').focus(); });
+  $('#ntSave').addEventListener('click', () => {
+    const dt = readDatumFeld('nt');
+    if (!dt) { toast('Bitte ein Datum wählen oder „Datum unbekannt“ ankreuzen.'); return; }
+    const datum = dt.datum;
+    let art = $('#ntArt').value;
+    if (art === '__neu') {
+      const name = $('#ntNewName').value.trim();
+      if (!name) { toast('Bitte einen Namen für die neue Wildart eingeben.'); return; }
+      art = addSpecies(name, $('#ntNewPts').value);
+    }
+    const rec = { id: ex?.id || `n-${Date.now().toString(36)}`, datum, art, anzahl: count, text: $('#ntText').value.trim() };
+    if (!datum) rec.season = dt.season;
+    state.data.nachtraege = state.data.nachtraege.filter(x => x.id !== rec.id);
+    state.data.nachtraege.push(rec);
+    state.season = recSeason(rec);
+    closeSheet(); switchTab('strecke');
+    persist(`Außerhalb der Jagdtage: ${count} ${speciesName(art)} (${datumText(datum)})`).then(ok => { if (ok) finishMeldung(); });
+  });
+  $('#ntDel')?.addEventListener('click', e => {
+    const b = e.currentTarget;
+    if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Wirklich löschen?'; return; }
+    state.data.nachtraege = state.data.nachtraege.filter(x => x.id !== ex.id);
+    closeSheet(); persist('Eintrag (außerhalb der Jagdtage) gelöscht');
+  });
+}
+
+/* Jagdkönig des laufenden Jagdjahres: nur Admin sieht ihn, bis er freigegeben wird.
+   Vergangene Jagdjahre sind immer sichtbar. */
+const koenigGesperrt = season => season === seasonOf(todayISO()) && !state.data?.koenigFrei?.[season];
+function koenigFreigabeCard(season) {
+  const zu = koenigGesperrt(season);
+  return `<div class="card pad kf-card ${zu ? 'zu' : 'frei'}">
+    <div><b>${zu ? '🔒 Nur für dich sichtbar' : '👁 Für alle sichtbar'}</b><small>${zu ? 'Die anderen sehen den Jagdkönig ' + esc(season) + ' erst nach der Freigabe.' : 'Alle Jäger sehen die Rangliste ' + esc(season) + '.'}</small></div>
+    <button class="btn ${zu ? '' : 'secondary'}" id="kfToggle">${zu ? 'Für alle freigeben' : 'Wieder sperren'}</button>
+  </div>`;
+}
+function wireKoenigFreigabe(season) {
+  $('#kfToggle')?.addEventListener('click', async e => {
+    const b = e.currentTarget, zu = koenigGesperrt(season);
+    if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = zu ? 'Wirklich freigeben?' : 'Wirklich sperren?'; return; }
+    state.data.koenigFrei = Object.assign({}, state.data.koenigFrei);
+    if (zu) state.data.koenigFrei[season] = true; else delete state.data.koenigFrei[season];
+    renderKoenig();
+    await persist(zu ? `Jagdkönig ${season} freigegeben` : `Jagdkönig ${season} gesperrt`);
+    toast(zu ? 'Jagdkönig ist jetzt für alle sichtbar.' : 'Jagdkönig ist wieder nur für dich sichtbar.', 3500);
+  });
+}
+function renderKoenig() {
+  const el = $('#view-koenig');
+  const st = seasonStats(state.season);
+  const rk = st.ranking;
+  if (koenigGesperrt(state.season) && !isAdmin()) {
+    el.innerHTML = `<div class="card pad empty"><img src="icons/logo.png" alt=""><p><b>Der Jagdkönig ${esc(state.season)} ist noch geheim.</b></p><p class="sub">Die Rangliste wird von Sebastian freigegeben. Die Jagdkönige der vergangenen Jagdjahre kannst du oben über die Auswahl des Jagdjahres ansehen.</p></div>`;
+    return;
+  }
+  const kf = isAdmin() && state.season === seasonOf(todayISO()) ? koenigFreigabeCard(state.season) : '';
+  if (!rk.length) {
+    el.innerHTML = kf + `<div class="card pad empty"><img src="icons/logo.png" alt=""><p>Noch keine Punkte im Jagdjahr ${esc(state.season)}.</p></div>`;
+    wireKoenigFreigabe(state.season);
+    return;
+  }
+  const byRank = r => rk.filter(x => x.rank === r);
+  const ranks = [...new Set(rk.map(r => r.rank))].slice(0, 3);
+  const pod = (r, cls) => {
+    const people = byRank(r);
+    if (!people.length) return `<div></div>`;
+    return `<div class="pod ${cls}">
+      ${cls === 'p1' ? '<div class="crown-big">♛</div>' : ''}
+      <div class="rank">${r}. PLATZ</div>
+      <div class="nm">${names(people.map(p => p.id))}</div>
+      <div class="pt">${fmt(people[0].punkte)} <small>Pkt.</small></div>
+    </div>`;
+  };
+  const max = rk[0].punkte || 1;
+  const last = st.days[st.days.length - 1];
+  let html = kf + `
+    <div class="sub" style="text-align:center">Stand nach ${st.days.length} Jagdtag${st.days.length === 1 ? '' : 'en'}${last ? ` · zuletzt ${dateDE(last.datum)}` : ''}</div>
+    <div class="podium">${pod(ranks[1], 'p2')}${pod(ranks[0], 'p1')}${pod(ranks[2], 'p3')}</div>
+    <h2 class="section">Rangliste ${esc(state.season)}</h2>
+    <div class="card"><ol class="rank-list">
+      ${rk.map(r => {
+        const parts = species().filter(w => r.erlegt[w.id] || r.hund[w.id]).map(w => {
+          const e = r.erlegt[w.id] || 0, h = r.hund[w.id] || 0;
+          return `${e + h} ${w.name}${h ? ` (${h}× Hund)` : ''}`;
+        });
+        const titles = [r.siege ? `${r.siege}× Tageskönig` : '', r.vize ? `${r.vize}× Vize` : '', r.sonder ? `${r.sonder}× Sonderkönig` : ''].filter(Boolean);
+        return `<li class="rank-item ${r.rank <= 3 ? 'top' : ''} ${r.punkte ? '' : 'zero'}">
+          <div class="rank-no">${r.rank}.</div>
+          <div>
+            <div class="rank-name">${esc(shooterName(r.id))}</div>
+            <div class="rank-meta">${esc(parts.join(' · '))}${titles.length ? ` — ${esc(titles.join(', '))}` : ''}</div>
+            <div class="bar"><i style="width:${Math.max(2, (r.punkte / max) * 100)}%"></i></div>
+          </div>
+          <div class="rank-pts">${fmt(r.punkte)}<small>${r.stueck} Stück</small></div>
+        </li>`;
+      }).join('')}
+    </ol></div>
+    <p class="hint" style="text-align:center">Punkte: ${species().map(w => `${esc(w.name)} ${fmt(w.punkte)}`).join(' · ')}. Vom Hund gegriffenes Wild zählt zur Strecke, bringt aber keine Punkte.</p>`;
+  el.innerHTML = html;
+  wireKoenigFreigabe(state.season);
+}
+
+/* ================= Sheet ================= */
+/* ================= Zurück-Taste (Android) =================
+   Verlauf: Start (Ebene 0) → Bereich (Ebene 1) → offenes Fenster (Ebene 2).
+   „Zurück“ schließt erst ein Fenster, dann geht es zur Startseite, erst dort wird die App verlassen. */
+let ignorePops = 0;
+const histLvl = () => (history.state && history.state.sb) || 0;
+function histBack() { ignorePops++; history.back(); }
+window.addEventListener('popstate', () => {
+  if (ignorePops > 0) { ignorePops--; return; }
+  if ($('#pdfv')) { closePdfViewer(true); return; }
+  if (!$('#sheet').hidden) { closeSheet(true); return; }
+  if (state.tab !== 'start') { switchTab('start', true); }
+});
+
+function openSheet(title, body, foot = '') {
+  if ($('#sheet').hidden) history.pushState({ sb: histLvl() + 1, sheet: true }, '');
+  $('#sheetTitle').textContent = title;
+  $('#sheetBody').innerHTML = body;
+  $('#sheetFoot').innerHTML = foot;
+  $('#sheet').hidden = false;
+  $('#sheetBody').scrollTop = 0;
+  document.body.style.overflow = 'hidden';
+}
+function closeSheet(fromPop = false) {
+  if (!fromPop && !$('#sheet').hidden && history.state && history.state.sheet) histBack();
+  $('#sheet').hidden = true; document.body.style.overflow = '';
+  $('#sheet').classList.remove('over-lock');
+  editor = null;
+}
+document.addEventListener('click', e => { if (e.target.closest('[data-close]')) closeSheet(); });
+
+/* ================= Jagdtag-Detail ================= */
+function openDay(id) {
+  const d = state.data.jagdtage.find(x => x.id === id);
+  if (!d) return;
+  const ds = dayStats(d);
+  const v = isVenslage(d), tj = isTreibjagd(d), g = hasGuests(d);
+  const cols = species().filter(w => ds.perSpecies[w.id] || ds.perSpeciesAll[w.id]);
+  const rowHtml = r => `<tr><td>${esc(r.gast ? r.plain : r.name)}${r.gast && r.gastgeber ? `<small class="host">Gast von ${esc(shooterName(r.gastgeber))}</small>` : ''}</td>${cols.map(w => {
+    const e = r.erlegt[w.id] || 0, h = r.hund[w.id] || 0;
+    return `<td class="${e + h ? '' : 'zero'}">${e + h}${h ? `<span class="dogmark">H</span>` : ''}</td>`;
+  }).join('')}<td class="pts">${fmt(r.punkte)}</td></tr>`;
+  const sumRow = (label, counts, total) => `<tr><td>${label}</td>${cols.map(w => `<td>${counts[w.id] || 0}</td>`).join('')}<td>${total} St.</td></tr>`;
+  const body = `
+    ${g ? `<div class="badge">${DAY_TYPES[d.art]}</div>` : ''}
+    <div class="chips">${chipsFor(ds.perSpecies, ds.perSpeciesHund)}</div>
+    ${v ? '<p class="hint">In den Streckenbericht geht nur die Zeile „Erlegt in Thuine“. Tageskönige werden über alle Jäger ermittelt, für den Jahres-Jagdkönig zählen nur unsere Schützen.</p>' : ''}
+    ${tj ? '<p class="hint">Das gesamte Wild (auch das der Gäste) geht in den Streckenbericht. Tageskönige werden über alle Jäger ermittelt, für den Jahres-Jagdkönig zählen nur unsere Schützen.</p>' : ''}
+    <div class="table-wrap"><table>
+      <thead><tr><th>${g ? 'Thuine' : 'Schütze'}</th>${cols.map(w => `<th>${esc(w.name)}</th>`).join('')}<th class="pts">Punkte</th></tr></thead>
+      <tbody>${ds.own.map(rowHtml).join('')}
+      ${g ? `<tr class="subhead"><td colspan="${cols.length + 2}">${v ? 'Venslage' : 'Gäste'}</td></tr>${ds.guests.map(rowHtml).join('') || `<tr><td colspan="${cols.length + 2}" class="zero">–</td></tr>`}` : ''}</tbody>
+      <tfoot>${v ? sumRow('Erlegt in Thuine', ds.perSpecies, ds.total) + sumRow('Gesamtstrecke', ds.perSpeciesAll, ds.totalAll) : sumRow('Gesamtstrecke', ds.perSpecies, ds.total)}</tfoot>
+    </table></div>
+    ${Object.keys(ds.perSpeciesHund).length ? '<p class="hint"><span class="dogmark">H</span> = davon vom Hund gegriffen (zählt zur Strecke, ohne Punkte)</p>' : ''}
+    <div class="card pad kings" style="margin-top:12px">
+      <div><span class="k"><span class="crown">♛</span> Jagdkönig</span> ${ds.koenig.length ? `${dayNames(ds, ds.koenig)} · ${fmt(ds.koenigPts)} Pkt.` : '–'}</div>
+      <div><span class="k">Vizekönig</span> ${ds.vize.length ? `${dayNames(ds, ds.vize)} · ${fmt(ds.vizePts)} Pkt.` : '–'}</div>
+      <div><span class="k">Sonderkönig</span> ${esc(sonderName(d.sonderkoenig)) || '–'}</div>
+    </div>
+    ${d.bemerkung ? `<div class="card pad"><div class="sub">Bemerkung</div>${esc(d.bemerkung)}</div>` : ''}`;
+  const foot = isAdmin()
+    ? `<button class="btn danger" id="delDay">Löschen</button><button class="btn" id="editDay">Bearbeiten</button>`
+    : '';
+  openSheet(`Jagdtag ${dateDE(d.datum, true)}`, body, foot);
+  $('#editDay')?.addEventListener('click', () => openEditor(d.id));
+  $('#delDay')?.addEventListener('click', e => {
+    const b = e.currentTarget;
+    if (b.dataset.armed) {
+      state.data.jagdtage = state.data.jagdtage.filter(x => x.id !== d.id);
+      closeSheet(); persist(`Jagdtag ${dateDE(d.datum)} gelöscht`);
+    } else { b.dataset.armed = '1'; b.textContent = 'Wirklich löschen?'; }
+  });
+}
+
+/* ================= Editor ================= */
+let editor = null;
+
+function openEditor(dayId, prefill = null) {
+  const existing = dayId ? state.data.jagdtage.find(x => x.id === dayId) : null;
+  const base = existing ? clone(existing) : { id: null, datum: todayISO(), art: 'normal', strecke: {}, hund: {}, gaeste: [], revier: {}, sonderkoenig: '', bemerkung: '' };
+  base.art ||= 'normal'; base.gaeste ||= []; base.revier ||= {};
+  editor = {
+    originalId: existing?.id || null,
+    day: base,
+    flags: {},          // id → Hinweistext
+    hinweise: [],
+    unassigned: [],     // von KI gelesen, keinem Schützen zugeordnet
+    open: new Set(),
+    showDog: new Set(Object.keys(base.hund || {})),
+    photo: null,
+    openG: new Set(),
+  };
+  if (prefill) Object.assign(editor, prefill);
+  renderEditor();
+}
+
+function editorShooters() {
+  const inDay = new Set([...Object.keys(editor.day.strecke), ...Object.keys(editor.day.hund), ...Object.keys(editor.flags)]);
+  const season = seasonOf(editor.day.datum || todayISO());
+  return state.data.schuetzen.filter(s => isMember(s, season) || inDay.has(s.id));
+}
+
+function renderEditor() {
+  const d = editor.day;
+  const pm = ptsMap();
+  const dupe = state.data.jagdtage.find(x => x.datum === d.datum && x.id !== editor.originalId);
+  const shooters = editorShooters();
+  const v = d.art === 'venslage', gd = hasGuests(d);
+  const totals = {};
+  for (const src of [d.strecke, d.hund]) for (const c of Object.values(src)) addCounts(totals, c);
+  const allTotals = addCounts({}, totals);
+  if (gd) for (const g of d.gaeste) { addCounts(allTotals, g.erlegt); addCounts(allTotals, g.hund); }
+  const barCounts = v ? d.revier : allTotals;
+
+  const alerts = [];
+  if (editor.hinweise.length) alerts.push(`<div class="alert"><b>Bitte prüfen:</b><ul>${editor.hinweise.map(h => `<li>${esc(h)}</li>`).join('')}</ul></div>`);
+  if (editor.photo) alerts.push(`<div class="alert info">Von der KI aus dem Foto gelesen. Bitte mit dem Zettel vergleichen und dann speichern.</div>`);
+  if (dupe) alerts.push(`<div class="alert">Für den ${dateDE(d.datum)} gibt es bereits einen Jagdtag. Beim Speichern wird er <b>ersetzt</b>.</div>`);
+
+  const unassigned = editor.unassigned.map((u, i) => `
+    <div class="card pad">
+      <div><b>Nicht zugeordnet:</b> „${esc(u.name)}“ – ${esc(species().filter(w => u.erlegt[w.id] || u.hund[w.id]).map(w => `${(u.erlegt[w.id] || 0) + (u.hund[w.id] || 0)} ${w.name}`).join(', ') || 'keine Strecke')}</div>
+      <div class="btn-row" style="margin-top:8px">
+        <select class="field-inline" data-assign="${i}" style="flex:1 1 180px;padding:8px;border-radius:10px;border:1px solid var(--line);background:var(--paper)">
+          <option value="">Schütze wählen …</option>
+          ${state.data.schuetzen.map(s => `<option value="${esc(s.id)}">${esc(s.vollname || s.name)} (${esc(s.name)})</option>`).join('')}
+          <option value="__new">+ Als neuen Schützen „${esc(u.name)}“ anlegen</option>
+        </select>
+        <button class="btn ghost" data-drop="${i}">Verwerfen</button>
+      </div>
+    </div>`).join('');
+
+  const rows = shooters.map(s => {
+    const e = d.strecke[s.id] || {}, h = d.hund[s.id] || {};
+    const cnt = sumCounts(e) + sumCounts(h);
+    const open = editor.open.has(s.id) || !!editor.flags[s.id];
+    const sum = species().filter(w => e[w.id] || h[w.id]).map(w => `${(e[w.id] || 0) + (h[w.id] || 0)} ${w.name}`).join(', ');
+    const dogOpen = editor.showDog.has(s.id);
+    return `<div class="ed-row ${cnt ? 'has' : ''} ${editor.flags[s.id] ? 'flag' : ''}" data-sid="${esc(s.id)}">
+      <button class="ed-head" data-toggle="${esc(s.id)}">
+        <span class="ed-name">${esc(s.name)}${s.vollname ? `<small class="ed-full">${esc(s.vollname)}</small>` : ''}</span>
+        <span class="ed-sum">${esc(sum)}</span>
+        <span class="ed-pts">${cnt ? fmt(pointsOf(e, pm)) : ''}</span>
+      </button>
+      ${editor.flags[s.id] ? `<div class="ed-flag">⚠ ${esc(editor.flags[s.id])}</div>` : ''}
+      ${open ? `<div class="ed-body">
+        <div class="steppers">${species().map(w => stepper(s.id, w, 'strecke', e[w.id] || 0)).join('')}</div>
+        ${dogOpen ? `<div class="hint" style="margin-top:12px">Vom Hund gegriffen (zählt zur Strecke, ohne Punkte):</div>
+          <div class="steppers">${species().map(w => stepper(s.id, w, 'hund', h[w.id] || 0)).join('')}</div>`
+          : `<button class="ed-toggle" data-dog="${esc(s.id)}">+ Vom Hund gegriffenes Wild</button>`}
+      </div>` : ''}
+    </div>`;
+  }).join('');
+
+  const body = `
+    <div class="ed-totals"><span>${v ? 'Erlegt in Thuine:' : 'Strecke:'}</span>${species().filter(w => barCounts[w.id]).map(w => `<span><b>${barCounts[w.id]}</b> ${esc(w.name)}</span>`).join('') || '<span class="sub">noch leer</span>'}<span style="margin-left:auto"><b>${sumCounts(barCounts)}</b> Stück${v ? ` · gesamt ${sumCounts(allTotals)}` : ''}${d.art === 'treibjagd' ? ' (inkl. Gäste)' : ''}</span></div>
+    ${editor.photo ? `<details class="card pad"><summary>Foto der Erlegerliste anzeigen</summary><img class="photo-preview" src="${editor.photo}" alt="Foto der Erlegerliste" style="margin-top:10px;max-height:70vh"></details>` : ''}
+    ${alerts.join('')}
+    <label class="field"><span>Jagdtag</span><input type="date" id="edDate" value="${esc(d.datum)}"></label>
+    <div class="seg" role="radiogroup" aria-label="Art des Jagdtages">
+      ${Object.keys(DAY_TYPES).map(k => `<button type="button" role="radio" aria-checked="${d.art === k}" class="${d.art === k ? 'on' : ''}" data-art="${k}">${DAY_SHORT[k]}</button>`).join('')}
+    </div>
+    ${unassigned}
+    ${gd ? '<div class="sec-label">Thuine</div>' : ''}
+    <div class="hint">Schützen antippen, um Wild einzutragen. Die Punkte werden automatisch berechnet.</div>
+    <div>${rows}</div>
+    <button class="btn secondary block" id="edAddShooter">+ ${gd ? 'Neuen Thuiner Schützen' : 'Gast / neuen Schützen'} hinzufügen</button>
+    ${gd ? guestEditorHtml(d) : ''}
+    <label class="field"><span>Sonderkönig</span>
+      <input type="text" id="edSonder" list="shooterList" value="${esc(sonderName(d.sonderkoenig))}" placeholder="optional">
+      <datalist id="shooterList">${state.data.schuetzen.map(s => `<option value="${esc(s.vollname || s.name)}">`).join('')}${gd ? d.gaeste.filter(g => g.name).map(g => `<option value="${esc(g.name)}">`).join('') : ''}</datalist>
+    </label>
+    <label class="field"><span>Bemerkung</span><textarea id="edNote" placeholder="optional, z. B. wer gefehlt hat">${esc(d.bemerkung)}</textarea></label>`;
+  const foot = `<button class="btn secondary" data-close>Abbrechen</button><button class="btn" id="edSave">Speichern</button>`;
+  const scroll = $('#sheet').hidden ? 0 : $('#sheetBody').scrollTop;
+  openSheet(editor.originalId ? `Jagdtag bearbeiten` : 'Neuer Jagdtag', body, foot);
+  $('#sheetBody').scrollTop = scroll;
+  bindEditor();
+}
+
+/** Bekannte Gast-Namen aus früheren Jagdtagen derselben Art (für Vorschläge) */
+function knownGuests(art) {
+  const set = new Set();
+  state.data.jagdtage.filter(t => t.art === art).forEach(t => (t.gaeste || []).forEach(g => g.name && set.add(g.name)));
+  return [...set].sort((a, b) => a.localeCompare(b, 'de'));
+}
+
+function guestEditorHtml(d) {
+  const pm = ptsMap();
+  const v = d.art === 'venslage';
+  const hosts = state.data.schuetzen.filter(s => isMember(s, seasonOf(d.datum || todayISO())));
+  const guests = d.gaeste.map((g, i) => {
+    const e = g.erlegt || {};
+    const cnt = sumCounts(e);
+    const open = editor.openG.has(i) || !g.name;
+    const sum = species().filter(w => e[w.id]).map(w => `${e[w.id]} ${w.name}`).join(', ');
+    return `<div class="ed-row ${cnt ? 'has' : ''} ${g._flag ? 'flag' : ''}">
+      <div class="g-head">
+        <input type="text" class="g-name" data-gname="${i}" value="${esc(g.name)}" placeholder="${v ? 'Name, z. B. „Vogt, A.“' : 'Name des Gastes'}" list="guestList" aria-label="Name ${v ? 'Venslager Jäger' : 'Gast'}">
+        <div class="g-sub">
+          <span class="ed-sum">${esc(sum) || '<span class="sub">noch kein Wild</span>'}</span>
+          <span class="ed-pts">${cnt ? fmt(pointsOf(e, pm)) + ' Pkt.' : ''}</span>
+          <button type="button" class="icon-btn" data-gtoggle="${i}" aria-label="Wild eintragen">${open ? '▴' : '▾'}</button>
+        </div>
+      </div>
+      ${g._flag ? `<div class="ed-flag">⚠ ${esc(g._flag)}</div>` : ''}
+      ${!v ? `<div class="host-row"><label>Gast von <select data-ghost="${i}"><option value="">– unbekannt –</option>${hosts.map(s => `<option value="${esc(s.id)}" ${g.gastgeber === s.id ? 'selected' : ''}>${esc(s.vollname || s.name)}</option>`).join('')}</select></label></div>` : ''}
+      ${open ? `<div class="ed-body">
+        <div class="steppers">${species().map(w => stepper(String(i), w, 'gast', e[w.id] || 0)).join('')}</div>
+        <button type="button" class="ed-toggle" data-gdel="${i}" style="color:var(--warn)">${v ? 'Jäger' : 'Gast'} entfernen</button>
+      </div>` : ''}
+    </div>`;
+  }).join('');
+  const head = v
+    ? `<div class="sec-label">Venslage</div>
+    <div class="hint">Jäger aus Venslage mit Namen eintragen. Sie zählen für die Tageskönige, aber nicht für unseren Jahres-Jagdkönig.</div>`
+    : `<div class="sec-label">Gäste</div>
+    <div class="hint">Die Gäste aus den freien Zeilen unter unseren Namen. Ihr Wild zählt voll zur Strecke und für die Tageskönige, aber nicht für unseren Jahres-Jagdkönig.</div>`;
+  return `
+    ${head}
+    <datalist id="guestList">${knownGuests(d.art).map(n => `<option value="${esc(n)}">`).join('')}</datalist>
+    <div>${guests}</div>
+    <button class="btn secondary block" id="edAddGuest">+ ${v ? 'Venslager Jäger' : 'Gast'} hinzufügen</button>
+    ${v ? venslageRevierHtml(d) : ''}`;
+}
+
+function venslageRevierHtml(d) {
+  return `
+    <div class="sec-label">Erlegt in Thuine</div>
+    <div class="hint">Das Wild, das im Revier Thuine erlegt wurde (Zeile „Erlegt in Thuine“). Nur diese Zahlen gehen in unseren Streckenbericht.</div>
+    <div class="card pad"><div class="steppers" style="margin-top:0">${species().map(w => stepper('_', w, 'revier', d.revier[w.id] || 0)).join('')}</div></div>`;
+}
+
+function stepper(sid, w, kind, val) {
+  return `<div class="stepper ${kind === 'hund' ? 'dog' : ''}">
+    <span class="lab">${esc(w.name)} <small>${kind === 'hund' ? '' : fmt(w.punkte)}</small></span>
+    <span class="ctl">
+      <button type="button" data-step="-1" data-sid="${esc(sid)}" data-w="${w.id}" data-kind="${kind}" aria-label="${esc(w.name)} weniger">−</button>
+      <output>${val}</output>
+      <button type="button" data-step="1" data-sid="${esc(sid)}" data-w="${w.id}" data-kind="${kind}" aria-label="${esc(w.name)} mehr">+</button>
+    </span>
+  </div>`;
+}
+
+function syncEditorFields() {
+  if (!editor) return;
+  editor.day.datum = $('#edDate')?.value || editor.day.datum;
+  editor.day.sonderkoenig = $('#edSonder')?.value.trim() ?? editor.day.sonderkoenig;
+  editor.day.bemerkung = $('#edNote')?.value.trim() ?? editor.day.bemerkung;
+  $$('[data-gname]').forEach(i => { const g = editor.day.gaeste[Number(i.dataset.gname)]; if (g) g.name = i.value.trim(); });
+  $$('[data-ghost]').forEach(i => { const g = editor.day.gaeste[Number(i.dataset.ghost)]; if (g) g.gastgeber = i.value; });
+}
+
+function bindEditor() {
+  const body = $('#sheetBody');
+  body.querySelectorAll('[data-toggle]').forEach(b => b.addEventListener('click', () => {
+    syncEditorFields();
+    const id = b.dataset.toggle;
+    editor.open.has(id) ? editor.open.delete(id) : editor.open.add(id);
+    if (editor.flags[id] && !editor.open.has(id)) delete editor.flags[id]; // geprüft
+    renderEditor();
+  }));
+  body.querySelectorAll('[data-dog]').forEach(b => b.addEventListener('click', () => { syncEditorFields(); editor.showDog.add(b.dataset.dog); renderEditor(); }));
+  body.querySelectorAll('[data-art]').forEach(b => b.addEventListener('click', () => { syncEditorFields(); editor.day.art = b.dataset.art; renderEditor(); }));
+  body.querySelectorAll('[data-gtoggle]').forEach(b => b.addEventListener('click', () => {
+    syncEditorFields(); const i = Number(b.dataset.gtoggle);
+    editor.openG.has(i) ? editor.openG.delete(i) : editor.openG.add(i);
+    delete editor.day.gaeste[i]._flag; renderEditor();
+  }));
+  body.querySelectorAll('[data-gdel]').forEach(b => b.addEventListener('click', () => {
+    syncEditorFields(); editor.day.gaeste.splice(Number(b.dataset.gdel), 1); editor.openG.clear(); renderEditor();
+  }));
+  $('#edAddGuest')?.addEventListener('click', () => {
+    syncEditorFields(); editor.day.gaeste.push({ name: '', erlegt: {}, hund: {} }); editor.openG.add(editor.day.gaeste.length - 1); renderEditor();
+    $$('[data-gname]').at(-1)?.focus();
+  });
+  body.querySelectorAll('[data-step]').forEach(b => b.addEventListener('click', () => {
+    const { sid, w, kind } = b.dataset;
+    if (kind === 'gast' || kind === 'revier') {
+      syncEditorFields();
+      const c = kind === 'gast' ? (editor.day.gaeste[Number(sid)].erlegt ||= {}) : editor.day.revier;
+      c[w] = Math.max(0, (c[w] || 0) + Number(b.dataset.step));
+      if (!c[w]) delete c[w];
+      if (kind === 'gast') editor.openG.add(Number(sid));
+      renderEditor(); return;
+    }
+    const bucket = editor.day[kind];
+    const c = (bucket[sid] ||= {});
+    c[w] = Math.max(0, (c[w] || 0) + Number(b.dataset.step));
+    if (!c[w]) delete c[w];
+    if (!Object.keys(c).length) delete bucket[sid];
+    syncEditorFields(); renderEditor();
+  }));
+  $('#edDate').addEventListener('change', () => { syncEditorFields(); renderEditor(); });
+  body.querySelectorAll('[data-assign]').forEach(sel => sel.addEventListener('change', () => {
+    syncEditorFields();
+    const u = editor.unassigned[Number(sel.dataset.assign)];
+    let id = sel.value;
+    if (!id) return;
+    if (id === '__new') id = addShooter(u.name, '', seasonOf(editor.day.datum));
+    mergeCounts(editor.day.strecke, id, u.erlegt);
+    mergeCounts(editor.day.hund, id, u.hund);
+    if (Object.keys(u.hund).length) editor.showDog.add(id);
+    editor.open.add(id);
+    editor.unassigned.splice(Number(sel.dataset.assign), 1);
+    renderEditor();
+  }));
+  body.querySelectorAll('[data-drop]').forEach(b => b.addEventListener('click', () => { syncEditorFields(); editor.unassigned.splice(Number(b.dataset.drop), 1); renderEditor(); }));
+  $('#edAddShooter').addEventListener('click', () => {
+    syncEditorFields();
+    const wrap = document.createElement('div');
+    wrap.className = 'card pad';
+    wrap.innerHTML = `<label class="field"><span>Kurzname wie auf der Liste (z. B. „Muster, H.“)</span><input type="text" id="newShooter"></label>
+      <label class="field" style="margin-top:8px"><span>Voller Name (z. B. „Hans Muster“)</span><input type="text" id="newShooterFull"></label>
+      <div class="btn-row" style="margin-top:8px"><button class="btn" id="newShooterOk">Hinzufügen</button></div>`;
+    $('#edAddShooter').replaceWith(wrap);
+    $('#newShooter').focus();
+    $('#newShooterOk').addEventListener('click', () => {
+      const n = $('#newShooter').value.trim();
+      if (!n) return;
+      const id = addShooter(n, $('#newShooterFull').value.trim(), seasonOf(editor.day.datum));
+      editor.open.add(id); renderEditor();
+    });
+  });
+  $('#edSave').addEventListener('click', saveEditor);
+}
+
+function mergeCounts(bucket, id, counts) {
+  for (const [k, v] of Object.entries(counts || {})) {
+    if (!v) continue;
+    const c = (bucket[id] ||= {}); c[k] = (c[k] || 0) + v;
+  }
+}
+
+function addShooter(name, vollname = '', ab = '') {
+  const existing = findShooter(name);
+  if (existing) { existing.aktiv = true; if (vollname && !existing.vollname) existing.vollname = vollname; return existing.id; }
+  let id = slug(name), i = 2;
+  while (shooterById(id)) id = `${slug(name)}-${i++}`;
+  const s = { id, name, vollname: vollname || '', aktiv: true };
+  if (ab) s.ab = ab;
+  state.data.schuetzen.push(s);
+  return id;
+}
+
+async function saveEditor() {
+  syncEditorFields();
+  const d = editor.day;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d.datum)) { toast('Bitte ein gültiges Datum wählen.'); return; }
+  if (editor.unassigned.length) { toast('Bitte zuerst die nicht zugeordneten Einträge zuordnen oder verwerfen.', 3500); return; }
+  const isV = d.art === 'venslage', withG = hasGuests(d);
+  const gaeste = withG ? d.gaeste.map(g => {
+    const o = { name: (g.name || '').trim(), erlegt: g.erlegt || {}, hund: g.hund || {} };
+    if (!isV && g.gastgeber) o.gastgeber = g.gastgeber;
+    return o;
+  }).filter(g => g.name || sumCounts(g.erlegt)) : [];
+  if (gaeste.some(g => !g.name)) { toast(`Bitte bei allen ${isV ? 'Venslager Jägern' : 'Gästen'} einen Namen eintragen.`, 3500); return; }
+  d.id = d.datum;
+  // bestehende Einträge (alter Stand + gleicher Tag) ersetzen
+  state.data.jagdtage = state.data.jagdtage.filter(x => x.id !== editor.originalId && x.datum !== d.datum);
+  const rec = { id: d.id, datum: d.datum, art: DAY_TYPES[d.art] ? d.art : 'normal', sonderkoenig: d.sonderkoenig, bemerkung: d.bemerkung, strecke: d.strecke, hund: d.hund };
+  if (withG) rec.gaeste = gaeste;
+  if (isV) rec.revier = d.revier;
+  state.data.jagdtage.push(rec);
+  state.data.jagdtage.sort((a, b) => a.datum.localeCompare(b.datum));
+  state.season = seasonOf(d.datum);
+  const msg = `Jagdtag ${dateDE(d.datum)} ${editor.originalId ? 'geändert' : 'erfasst'}`;
+  closeSheet();
+  switchTab('tage');
+  await persist(msg);
+}
+
+/* ================= Foto → KI ================= */
+function startPhoto() {
+  if (!state.cfg.apiKey) {
+    toast('Für die Foto-Auswertung bitte zuerst den Anthropic-API-Schlüssel in den Einstellungen eintragen.', 4500);
+    openSettings(); return;
+  }
+  const inp = $('#photoInput');
+  inp.value = '';
+  inp.onchange = () => inp.files[0] && analysePhoto(inp.files[0]);
+  inp.click();
+}
+
+async function imageToJpeg(file, maxSide = 1800) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('Bild konnte nicht gelesen werden')); i.src = url; });
+    const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = document.createElement('canvas');
+    c.width = Math.round(img.naturalWidth * scale); c.height = Math.round(img.naturalHeight * scale);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', 0.85);
+  } finally { URL.revokeObjectURL(url); }
+}
+
+function buildPrompt() {
+  const list = state.data.schuetzen.map(s => `${s.id} = ${s.name}${s.vollname ? ` (${s.vollname})` : ''}`).join('\n');
+  const arten = species().map(w => `${w.id} (${w.name})`).join(', ');
+  return `Du liest eine handschriftlich ausgefüllte "Erlegerliste" (Streckenbericht einer Treibjagd) von einem Foto aus.
+
+Aufbau des Zettels: Oben "Jagdtag" mit Datum (z. B. 18.10.25). Darunter eine Tabelle: Spalte "Name" (vorgedruckte Schützen), dann Spalten für Wildarten und ganz rechts "Punkte" (handschriftlich, nur zur Kontrolle). Unten "Gesamtstrecke" und die Felder Jagdkönig, Vizekönig, Sonderkönig.
+Aktuelle Vorlage (ab 2026): Spalten "Hase", "Fasan", "Kanin.", "Taube", "Schnepf" (= schnepfe), "Sonstige". Ältere Zettel haben nur "Hase", "Fasan", "Kanin.", "Taube", "Sonstig".
+Die Spalte "Sonstige"/"Sonstig": Hier steht meist Zahl + Wildart als Wort (z. B. "1 Ente", "1 Fuchs", "1 Schnepfe"). Ordne das der passenden Wildart-ID zu (ente, fuchs, schnepfe, taube, kaninchen …). Nur wenn keine erkennbare Wildart dabeisteht, zählt es als "sonstiges". Scherz-Vermerke wie "Ast" sind kein Wild.
+
+Bekannte Schützen (id = Name auf dem Zettel (voller Name)):
+${list}
+
+Wildarten-IDs: ${arten}
+
+Regeln:
+- Lies für jede Zeile die Anzahl je Wildart-Spalte. Leere Zellen = 0. Nimm nur Zeilen auf, in denen etwas erlegt wurde.
+- Ist in einer Zelle zusätzlich ein Wort notiert (z. B. "1 Schnepfe" in der Spalte Sonstig), ordne es der passenden Wildart-ID zu (hier: schnepfe). Unbekanntes bleibt "sonstiges". "Kanin." = kaninchen.
+- Steht bei einer Zahl "Hund" (z. B. "1 Hund" in der Hasen-Spalte), hat der Hund das Stück gegriffen: trage es unter "hund" ein, NICHT unter "erlegt".
+- "punkte_zettel" = die handschriftliche Zahl in der Punkte-Spalte (bei Korrekturen der zuletzt gültige Wert), sonst null.
+- Ordne jede Zeile der passenden id aus der Liste zu. Steht dort ein Name, der nicht in der Liste ist, setze "schuetze_id": null und gib den Namen in "name_zettel" an.
+- Handschriftliche Vermerke wie "fehlt" beim Namen gehören in "bemerkung" (z. B. "Beckhuis fehlte").
+- Datum als YYYY-MM-DD; zweistellige Jahre sind 20xx.
+- "sonderkoenig": der handschriftliche Eintrag im Feld Sonderkönig (möglichst als Name aus der Liste, z. B. "Geerdes, W."), sonst "".
+- Wenn du dir bei einer Zahl oder Zuordnung unsicher bist, schreibe es in "unsicher" der Zeile bzw. in "hinweise".
+- Durchgestrichene oder übermalte Zahlen gelten nicht, nur der zuletzt gültige Wert.
+- Spalten "Bezahlt" (Haken) und "Eingesammelt wird: … €" ignorieren.
+
+SONDERFALL "Jagdtag mit Venslage": Steht unten auf dem Zettel "Jagdtag mit Venslage" bzw. gibt es unter unserer Tabelle eine zweite Tabelle "Venslage" mit handschriftlich eingetragenen Namen, dann:
+- "art": "venslage" (sonst "normal").
+- Unsere vorgedruckten Schützen oben wie gewohnt in "eintraege".
+- Die handschriftlichen Jäger der Venslage-Tabelle in "gaeste": [{"name":"wie geschrieben, möglichst als \"Nachname, Initial\" (z. B. A. Vogt → \"Vogt, A.\")","erlegt":{...},"punkte_zettel":null,"unsicher":null}]. Nur Jäger mit Strecke aufnehmen. Namen sind Handschrift – wenn unsicher, in "unsicher" vermerken.
+- Die Zeile "Erlegt in Thuine" (gelb) als "revier": {"hase":0,...} – das ist das Wild aus dem Revier Thuine, unabhängig davon, wer es geschossen hat.
+- Einträge wie "Ast" oder andere Scherz-Vermerke sind KEIN Wild: nicht zählen, sondern in "bemerkung" erwähnen (z. B. "Brockhaus: Ast").
+- Die Zeile "Gesamtstrecke" nur zur Kontrolle nutzen; wenn unsere Zeilen + Venslage nicht zur Gesamtstrecke passen, in "hinweise" vermerken.
+
+SONDERFALL "Große Treibjagd": Steht oben "Große Treibjagd" und gibt es unter JEDEM vorgedruckten Namen eine freie Zeile, in die handschriftlich ein Jagdgast eingetragen ist, dann:
+- "art": "treibjagd".
+- Unsere vorgedruckten Schützen wie gewohnt in "eintraege".
+- Jeder handschriftlich eingetragene Gast in "gaeste": [{"name":"wie geschrieben","gastgeber":"id des Schützen, unter dessen Namen die Gastzeile steht","erlegt":{...},"punkte_zettel":null,"unsicher":null}]. Gäste ohne Strecke weglassen. Nicht lesbare Namen: "name":"" und in "unsicher" vermerken.
+- Spalten "Beitrag bez." und "Kostenbeitrag" ignorieren.
+
+Antworte ausschließlich mit JSON in genau diesem Format, ohne weiteren Text:
+{"datum":"YYYY-MM-DD","art":"normal | venslage | treibjagd","eintraege":[{"schuetze_id":"id oder null","name_zettel":"...","erlegt":{"hase":0},"hund":{},"punkte_zettel":null,"unsicher":null}],"gaeste":[],"revier":{},"sonderkoenig":"","bemerkung":"","hinweise":[]}`;
+}
+
+async function analysePhoto(file) {
+  openSheet('Foto wird ausgewertet', `<div class="empty"><div class="spinner"></div><p>Die KI liest die Erlegerliste … das dauert etwa 10–30 Sekunden.</p></div>`, `<button class="btn secondary" data-close>Abbrechen</button>`);
+  const ctrl = new AbortController();
+  const closeBtn = $('#sheetFoot [data-close]');
+  closeBtn?.addEventListener('click', () => ctrl.abort());
+  try {
+    const dataUrl = await imageToJpeg(file);
+    const b64 = dataUrl.split(',')[1];
+    const model = state.cfg.model || FALLBACK_MODEL;
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST', signal: ctrl.signal,
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': state.cfg.apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      body: JSON.stringify({
+        model, max_tokens: 3000,
+        messages: [{ role: 'user', content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } },
+          { type: 'text', text: buildPrompt() },
+        ] }],
+      }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j?.error?.message || `API-Fehler ${r.status}`);
+    const text = (j.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
+    const m = text.match(/\{[\s\S]*\}/);
+    if (!m) throw new Error('Antwort der KI enthielt kein JSON.');
+    const parsed = JSON.parse(m[0]);
+    if ($('#sheet').hidden) return; // abgebrochen
+    applyAiResult(parsed, dataUrl);
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+    openSheet('Auswertung fehlgeschlagen', `<div class="alert">${esc(e.message)}</div><p class="hint">Du kannst es erneut versuchen oder den Jagdtag manuell erfassen.</p>`,
+      `<button class="btn secondary" id="failManual">Manuell erfassen</button><button class="btn" id="failRetry">Neues Foto</button>`);
+    $('#failManual').addEventListener('click', () => openEditor(null));
+    $('#failRetry').addEventListener('click', startPhoto);
+  }
+}
+
+function cleanCounts(obj) {
+  const valid = new Set(species().map(w => w.id));
+  const out = {};
+  for (const [k, v] of Object.entries(obj || {})) {
+    const n = Math.round(Number(v));
+    if (!n || n < 0) continue;
+    const key = valid.has(k) ? k : 'sonstiges';
+    out[key] = (out[key] || 0) + n;
+  }
+  return out;
+}
+
+function applyAiResult(res, photo) {
+  const day = { id: null, datum: /^\d{4}-\d{2}-\d{2}$/.test(res.datum || '') ? res.datum : todayISO(), strecke: {}, hund: {}, sonderkoenig: res.sonderkoenig || '', bemerkung: res.bemerkung || '' };
+  const flags = {}; const hinweise = [...(res.hinweise || [])]; const unassigned = []; const open = new Set(); const showDog = new Set();
+  if (!res.datum) hinweise.push('Datum nicht lesbar – bitte eintragen.');
+  const pm = ptsMap();
+  for (const e of res.eintraege || []) {
+    const erlegt = cleanCounts(e.erlegt), hund = cleanCounts(e.hund);
+    if (!sumCounts(erlegt) && !sumCounts(hund)) continue;
+    let id = e.schuetze_id && shooterById(e.schuetze_id) ? e.schuetze_id : null;
+    if (!id && e.name_zettel) id = findShooter(e.name_zettel)?.id || null;
+    if (!id) { unassigned.push({ name: e.name_zettel || 'Unbekannt', erlegt, hund }); continue; }
+    mergeCounts(day.strecke, id, erlegt);
+    mergeCounts(day.hund, id, hund);
+    if (sumCounts(hund)) showDog.add(id);
+    const calc = pointsOf(day.strecke[id] || {}, pm);
+    const notes = [];
+    if (e.punkte_zettel != null && Number(e.punkte_zettel) !== calc) notes.push(`Zettel: ${fmt(Number(e.punkte_zettel))} Pkt., berechnet: ${fmt(calc)} Pkt.`);
+    if (e.unsicher) notes.push(`KI unsicher: ${e.unsicher}`);
+    if (notes.length) { flags[id] = notes.join(' · '); open.add(id); }
+  }
+  // Sonderkönig auf bekannten Namen abbilden
+  if (day.sonderkoenig) {
+    const s = findShooter(day.sonderkoenig);
+    if (s) day.sonderkoenig = s.vollname || s.name;
+  }
+  // Venslage
+  const openG = new Set();
+  day.art = DAY_TYPES[res.art] ? res.art : ((res.gaeste || []).length ? 'venslage' : 'normal');
+  day.gaeste = []; day.revier = {};
+  if (hasGuests(day)) {
+    if (day.art === 'venslage') day.revier = cleanCounts(res.revier);
+    for (const g of res.gaeste || []) {
+      const erlegt = cleanCounts(g.erlegt);
+      if (!sumCounts(erlegt)) continue;
+      const guest = { name: String(g.name || '').trim(), erlegt, hund: {} };
+      if (day.art === 'treibjagd' && g.gastgeber && shooterById(g.gastgeber)) guest.gastgeber = g.gastgeber;
+      const notes = [];
+      const calc = pointsOf(erlegt, pm);
+      if (g.punkte_zettel != null && Number(g.punkte_zettel) !== calc) notes.push(`Zettel: ${fmt(Number(g.punkte_zettel))} Pkt., berechnet: ${fmt(calc)} Pkt.`);
+      if (g.unsicher) notes.push(`KI unsicher: ${g.unsicher}`);
+      if (!guest.name) notes.push('Name nicht lesbar – bitte eintragen');
+      if (notes.length) { guest._flag = notes.join(' · '); openG.add(day.gaeste.length); }
+      day.gaeste.push(guest);
+    }
+    if (day.art === 'venslage' && !sumCounts(day.revier)) hinweise.push('Zeile „Erlegt in Thuine“ nicht erkannt – bitte unten eintragen.');
+  }
+  // Sonderkönig ggf. Venslager Name
+  if (day.sonderkoenig && !findShooter(day.sonderkoenig)) {
+    const g = day.gaeste.find(x => x.name.toLowerCase() === day.sonderkoenig.toLowerCase());
+    if (g) day.sonderkoenig = g.name;
+  }
+  const existing = state.data.jagdtage.find(x => x.datum === day.datum);
+  openEditor(null);
+  Object.assign(editor, { day, flags, hinweise, unassigned, open, showDog, photo, openG, originalId: existing ? existing.id : null });
+  if (existing) editor.hinweise.unshift(`Für den ${dateDE(day.datum)} ist bereits ein Jagdtag gespeichert – er wird beim Speichern ersetzt.`);
+  renderEditor();
+}
+
+/* ================= Einstellungen ================= */
+function openSettings() {
+  const c = state.cfg;
+  const body = `
+    <div class="alert info">${viaKonto() && isAdmin() ? '<b>Admin (über dein Konto).</b> Du kannst alles erfassen und verwalten.' : viaKonto() ? '<b>Angemeldet mit Konto.</b> Du kannst alles ansehen und Wild melden.' : isAdmin() ? '<b>Voller Zugang.</b> Du kannst alles erfassen und verwalten.' : canSchalen() ? '<b>Zugang Schalenwild.</b> Du kannst Reh-, Dam- und Schwarzwild eintragen, alles andere nur ansehen.' : '<b>Ansichtsmodus.</b> Zum Ansehen brauchst du nichts einzutragen.'}</div>
+    ${window.Konto?.settingsHtml() || ''}
+    <fieldset><legend>${CONF.api ? 'Auf diesem Gerät' : 'Zugang'}</legend>
+      <label class="field"><span>Ich bin</span>
+        <select id="cfIch"><option value="">– bitte wählen –</option>${state.data.schuetzen.filter(s => isMember(s, seasonOf(todayISO())) || s.id === c.ich).map(s => `<option value="${esc(s.id)}" ${s.id === c.ich ? 'selected' : ''}>${esc(s.vollname || s.name)}</option>`).join('')}</select>
+      </label>
+      ${CONF.api ? `<details ${tokenAdmin() ? 'open' : ''}><summary>Zugang mit GitHub-Token (bisherige Methode)</summary>` : ''}
+      <label class="field"><span>Berechtigung</span>
+        <select id="cfMode">
+          <option value="" ${!c.mode ? 'selected' : ''}>Nur ansehen</option>
+          ${c.mode === 'schalen' ? '<option value="schalen" selected>Schalenwild eintragen</option>' : ''}
+          <option value="voll" ${c.mode === 'voll' ? 'selected' : ''}>Voller Zugang (Verwaltung)</option>
+        </select>
+      </label>
+      <label class="field"><span>Zugriffs-Token (nur auf diesem Gerät gespeichert)</span><input id="cfToken" type="password" value="${esc(c.token)}" placeholder="github_pat_…" autocomplete="off"></label>
+      <p class="hint">Den Token bekommst du von Sebastian. Er wird nur auf diesem Gerät gespeichert.${CONF.api ? ' Mit einem Konto (oben) ist kein Token nötig.' : ''}</p>
+      ${c.mode === 'voll' ? `<details><summary>Speicherort (GitHub)</summary>
+        <div class="grid2" style="margin-top:10px">
+          <label class="field"><span>Konto</span><input id="cfOwner" value="${esc(c.owner)}" autocapitalize="off" autocorrect="off"></label>
+          <label class="field"><span>Repository Hauptdaten</span><input id="cfRepo" value="${esc(c.repo)}" autocapitalize="off" autocorrect="off"></label>
+        </div>
+        <label class="field" style="margin-top:10px"><span>Repository Schalenwild</span><input id="cfRepo2" value="${esc(c.repo2)}" autocapitalize="off" autocorrect="off"></label>
+      </details>` : ''}
+      ${CONF.api ? '</details>' : ''}
+    </fieldset>
+    <fieldset><legend>Termine</legend>
+      <label class="check-row"><input type="checkbox" id="cfErinnerung" ${c.erinnerung !== false ? 'checked' : ''}> <span><b>Erinnerung 60 Minuten vorher</b><small>„In Kalender“ übernimmt den Termin mit Erinnerung, und die App zeigt in der letzten Stunde einen Hinweis auf der Startseite.</small></span></label>
+    </fieldset>
+    ${isAdmin() ? `<fieldset><legend>Meldungen</legend>
+      <label class="field"><span>Melde-Zugang (Token nur für das Repository „${esc(meldRepo())}“)</span><input id="cfMeldToken" type="password" value="${esc(meldToken())}" placeholder="github_pat_…" autocomplete="off"></label>
+      <p class="hint">Damit können alle Jäger über „Erlegtes Wild melden“ Meldungen an dich schicken. Der Zugang wird verschlüsselt in den gemeinsamen Daten gespeichert – nur wer das Passwort kennt, kann melden. ${canMelden() ? '✓ Aktiv.' : '<b>Noch nicht eingerichtet.</b>'}</p>
+      <label class="field" style="margin-top:10px"><span>Push-Kanal (ntfy)</span><input id="cfNtfy" type="text" value="${esc(ntfyTopic())}" placeholder="leer = keine Push-Nachricht" autocomplete="off" autocapitalize="off" autocorrect="off"></label>
+      <div class="ml-actions"><button type="button" class="btn secondary" id="cfNtfyNew">Kanal erzeugen</button><button type="button" class="btn secondary" id="cfNtfyTest">Test senden</button></div>
+      <p class="hint">In der kostenlosen App <b>ntfy</b> auf „+“ tippen und genau diesen Kanalnamen abonnieren (Server ntfy.sh). Dann kommt bei jeder Meldung eine Push-Nachricht – ohne Namen, nur Wildart und Datum.</p>
+      ${'setAppBadge' in navigator && 'Notification' in window ? `<button type="button" class="btn secondary block" id="cfBadge" style="margin-top:8px">${Notification.permission === 'granted' ? '✓ Zahl am App-Symbol aktiv' : 'Zahl am App-Symbol erlauben'}</button>` : ''}
+    </fieldset>` : ''}
+    ${isAdmin() ? `<fieldset><legend>Freigabe Damwild</legend>
+      <p class="hint">In der Übersicht: ${esc(fgKats().map(x => x.lbl).join(', ') || '– nichts –')}</p>
+      <button type="button" class="btn secondary block" id="cfFgWild">Wild für die Freigabe bearbeiten</button>
+    </fieldset>` : ''}
+    ${isAdmin() ? `<fieldset><legend>Datenschutz</legend>
+      <label class="field"><span>Passwort der Jagdgemeinschaft</span><input id="cfPw" type="text" value="${esc(state.pw)}" placeholder="mind. 6 Zeichen" autocomplete="off" autocapitalize="off" autocorrect="off"></label>
+      <p class="hint">${state.pw ? 'Die Daten werden verschlüsselt gespeichert. Alle Jäger brauchen dieses Passwort zum Ansehen.' : '<b>Noch kein Passwort gesetzt – die Daten sind im Klartext lesbar.</b>'} Ändern: neues Passwort eintragen und übernehmen, danach müssen alle Jäger das neue Passwort einmal eingeben. <b>Passwort gut aufbewahren – ohne es sind die Daten nicht mehr lesbar.</b></p>
+    </fieldset>` : ''}
+    <fieldset ${isAdmin() ? '' : 'hidden'}><legend>Foto-Auswertung (KI)</legend>
+      <label class="field"><span>Anthropic-API-Schlüssel (nur auf diesem Gerät gespeichert)</span><input id="cfKey" type="password" value="${esc(c.apiKey)}" placeholder="sk-ant-…" autocomplete="off"></label>
+      <label class="field"><span>Modell</span>
+        <select id="cfModel">${c.model ? `<option value="${esc(c.model)}" selected>${esc(c.model)}</option>` : `<option value="">Standard (${FALLBACK_MODEL})</option>`}</select>
+      </label>
+      <button class="btn secondary block" id="cfLoadModels">Verfügbare Modelle laden</button>
+    </fieldset>
+    ${isAdmin() ? `
+    <fieldset><legend>Schützen</legend>
+      <div id="cfShooters">${state.data.schuetzen.map(s => shooterCfgRow(s)).join('')}</div>
+      <button class="btn secondary block" id="cfAddShooter" style="margin-top:10px">+ Neuer Schütze</button>
+      <p class="hint">„ab“/„bis“ = Jagdjahre, in denen der Schütze dabei ist. Außerhalb davon erscheint er nicht mehr beim Erfassen, seine alten Ergebnisse bleiben erhalten. Der Kurzname muss so lauten wie auf der Erlegerliste.</p>
+    </fieldset>
+    <fieldset><legend>Wildarten &amp; Punkte</legend>
+      <div id="cfSpecies">${species().map(w => `<div class="list-row" data-wrow="${w.id}"><span class="nm">${esc(w.name)}</span><input type="number" step="0.5" min="0" data-wpts="${w.id}" value="${w.punkte}">${w.eigen && !speciesUsed(w.id) ? `<button type="button" class="icon-btn" data-wdel="${w.id}" aria-label="${esc(w.name)} entfernen" title="Entfernen">✕</button>` : '<span class="icon-spacer"></span>'}</div>`).join('')}</div>
+      <div class="list-row"><input type="text" id="cfNewSpecies" placeholder="Neue Wildart"><input type="number" step="0.5" min="0" id="cfNewSpeciesPts" value="1" aria-label="Punkte"><button type="button" class="icon-btn" id="cfAddSpecies" aria-label="Wildart hinzufügen" title="Hinzufügen">＋</button></div>
+      <p class="hint">Achtung: Punktänderungen gelten rückwirkend für alle Jagdjahre. Eigene Wildarten lassen sich entfernen, solange sie nirgends eingetragen sind.</p>
+    </fieldset>
+    <fieldset><legend>Datensicherung</legend>
+      <div class="btn-row"><button class="btn secondary" id="cfExport">Sicherung speichern</button><button class="btn secondary" id="cfImport">Sicherung einspielen</button></div>
+      <p class="hint">Die Sicherung enthält Niederwild <b>und</b> Schalenwild – <b>unverschlüsselt</b>. Nur im eigenen Ordner aufbewahren (z. B. OneDrive), nicht weitergeben. Mit ihr lässt sich auch ein vergessenes Passwort zurücksetzen.</p>
+      <input type="file" id="cfImportFile" accept="application/json,.json" hidden>
+    </fieldset>` : ''}
+    <fieldset class="impressum"><legend>Über die App</legend>
+      <div class="imp-head"><img src="icons/logo.png" alt=""><div><b>Jagd Thuine</b><small>App der Jagdgemeinschaft Thuine · Version ${APP_VERSION}</small></div></div>
+      <p>Entwickelt von <b>Sebastian Bruns</b>, Thuine.</p>
+      <p class="hint">Die App ist ein privates, nicht-kommerzielles Angebot für die Mitglieder der Jagdgemeinschaft Thuine. Die Daten werden verschlüsselt gespeichert und sind nur mit dem Passwort der Jagdgemeinschaft lesbar.</p>
+      <p class="hint">© ${new Date().getFullYear()} Sebastian Bruns · Fragen und Wünsche bitte direkt an Sebastian.</p>
+      <div class="imp-btns">
+        <button type="button" class="btn secondary" id="cfInvite">🔗 Einrichtungs-Link kopieren</button>
+        ${isStandalone() ? '' : '<button type="button" class="btn secondary" id="cfInstall">📲 App installieren</button>'}
+      </div>
+      <p class="hint">Der Einrichtungs-Link öffnet die App mit der Installationshilfe – gut zum Weiterschicken (z. B. per WhatsApp).</p>
+    </fieldset>`;
+  openSheet('Einstellungen', body, `<button class="btn secondary" data-close>Abbrechen</button><button class="btn" id="cfSave">Übernehmen</button>`);
+  window.Konto?.wireSettings($('#sheet'));
+  $('#cfFgWild')?.addEventListener('click', () => { closeSheet(); setTimeout(openFreigabeWild, 50); });
+  $('#cfInvite')?.addEventListener('click', () => kopiereLink(appLink() + '?installieren'));
+  $('#cfInstall')?.addEventListener('click', () => { lsSet(LS_INST_HIDE, undefined); closeSheet(); renderStart(); setTimeout(() => startInstall(), 50); });
+
+  const removed = new Set();
+  $('#cfNtfyNew')?.addEventListener('click', () => { $('#cfNtfy').value = newNtfyTopic(); toast('Neuer Kanal – jetzt in der ntfy-App abonnieren und „Übernehmen“ tippen.', 4500); });
+  $('#cfNtfyTest')?.addEventListener('click', async () => {
+    const t = $('#cfNtfy').value.trim(); if (!t) { toast('Erst einen Kanal erzeugen.'); return; }
+    toast(await sendPush(t, 'Jagd Thuine', 'Test – Push-Nachrichten funktionieren ✓') ? 'Test gesendet – kommt die Nachricht an?' : 'Senden fehlgeschlagen – Internet prüfen.', 4000);
+  });
+  $('#cfBadge')?.addEventListener('click', async e => {
+    const b = e.currentTarget;
+    try { const p = await Notification.requestPermission(); if (p === 'granted') { b.textContent = '✓ Zahl am App-Symbol aktiv'; updateBadge(); } else toast('Nicht erlaubt – änderbar in den Handy-Einstellungen unter Mitteilungen → Strecke.', 4500); }
+    catch { toast('Auf dem iPhone geht das nur in der App vom Home-Bildschirm.', 4000); }
+  });
+  $$('[data-wdel]').forEach(b => b.addEventListener('click', () => { removed.add(b.dataset.wdel); b.closest('.list-row').remove(); }));
+  $('#cfAddSpecies')?.addEventListener('click', () => {
+    const name = $('#cfNewSpecies').value.trim(); if (!name) return;
+    if (species().some(w => w.name.toLowerCase() === name.toLowerCase()) || $$('[data-newspecies]').some(i => i.dataset.newspecies.toLowerCase() === name.toLowerCase())) { toast('Diese Wildart gibt es schon.'); return; }
+    $('#cfSpecies').insertAdjacentHTML('beforeend', `<div class="list-row"><span class="nm">${esc(name)} <small class="sub">(neu)</small></span><input type="number" step="0.5" min="0" data-newspecies="${esc(name)}" value="${esc($('#cfNewSpeciesPts').value || '1')}"><span class="icon-spacer"></span></div>`);
+    $('#cfNewSpecies').value = '';
+  });
+  $('#cfAddShooter')?.addEventListener('click', () => {
+    const tmp = { id: `neu-${Date.now()}`, name: '', vollname: '', ab: seasonOf(todayISO()), _neu: true };
+    $('#cfShooters').insertAdjacentHTML('beforeend', shooterCfgRow(tmp));
+    $$('#cfShooters [data-sname]').at(-1)?.focus();
+  });
+  $('#cfLoadModels').addEventListener('click', async () => {
+    const key = $('#cfKey').value.trim();
+    if (!key) { toast('Bitte zuerst den API-Schlüssel eintragen.'); return; }
+    try {
+      const r = await fetch('https://api.anthropic.com/v1/models?limit=100', { headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' } });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j?.error?.message || r.status);
+      const models = (j.data || []).map(m => m.id);
+      const pick = state.cfg.model || models.find(m => m.includes('sonnet')) || models[0] || FALLBACK_MODEL;
+      $('#cfModel').innerHTML = models.map(m => `<option value="${esc(m)}" ${m === pick ? 'selected' : ''}>${esc(m)}</option>`).join('');
+      toast('Schlüssel gültig ✓ – Modelle geladen.');
+    } catch (e) { toast('Schlüssel/Modelle: ' + e.message, 4500); }
+  });
+  $('#cfExport')?.addEventListener('click', saveBackup);
+  $('#cfImport')?.addEventListener('click', () => $('#cfImportFile').click());
+  $('#cfImportFile')?.addEventListener('change', async e => {
+    try {
+      const src = parseBackup(JSON.parse(await e.target.files[0].text()));
+      closeSheet();
+      await restoreData(src);
+      toast(src.schalen ? 'Sicherung eingespielt (Niederwild + Schalenwild).' : 'Sicherung eingespielt (nur Niederwild).', 4000);
+    } catch (err) { toast('Import fehlgeschlagen: ' + err.message, 4000); }
+  });
+  $('#cfSave').addEventListener('click', async () => {
+    const before = JSON.stringify({ s: state.data.schuetzen, w: state.data.wildarten });
+    const modeBefore = state.cfg.mode;
+    const newPw = $('#cfPw') ? $('#cfPw').value.trim() : state.pw;
+    if (newPw !== state.pw && newPw.length < 6) { toast('Das Passwort muss mindestens 6 Zeichen haben.', 3500); return; }
+    const pwChanged = newPw !== state.pw;
+    const newMeld = $('#cfMeldToken') ? $('#cfMeldToken').value.trim() : meldToken();
+    const newNtfy = $('#cfNtfy') ? $('#cfNtfy').value.trim() : ntfyTopic();
+    const meldChanged = newMeld !== meldToken() || newNtfy !== ntfyTopic();
+    if (meldChanged) {
+      state.data.melde = Object.assign({}, state.data.melde, { token: newMeld, ntfy: newNtfy });
+      if (!newMeld) delete state.data.melde.token;
+      if (!newNtfy) delete state.data.melde.ntfy;
+    }
+    Object.assign(state.cfg, {
+      owner: $('#cfOwner')?.value.trim() ?? state.cfg.owner, repo: $('#cfRepo')?.value.trim() ?? state.cfg.repo, repo2: $('#cfRepo2')?.value.trim() ?? state.cfg.repo2,
+      token: $('#cfToken').value.trim(), apiKey: $('#cfKey').value.trim(), model: $('#cfModel').value,
+      mode: $('#cfMode').value, ich: $('#cfIch').value, erinnerung: $('#cfErinnerung').checked,
+    });
+    if (pwChanged) { state.pwOld = state.pw; state.pw = newPw; lsSet(LS_PW, newPw); }
+    if (!pwChanged) loadSchalen();
+    lsSet(LS_CFG, state.cfg);
+    $$('.sh-cfg').forEach(row => {
+      const id = row.dataset.sid;
+      const kurz = $('[data-sname]', row).value.trim(), voll = $('[data-sfull]', row).value.trim();
+      const ab = $('[data-sab]', row).value, bis = $('[data-sbis]', row).value;
+      let s = shooterById(id);
+      if (!s) { if (!kurz) return; s = shooterById(addShooter(kurz, voll)); }
+      if (kurz) s.name = kurz;
+      s.vollname = voll;
+      s.aktiv = true;
+      if (ab) s.ab = ab; else delete s.ab;
+      if (bis) s.bis = bis; else delete s.bis;
+    });
+    $$('[data-wpts]').forEach(i => { const w = species().find(x => x.id === i.dataset.wpts); const v = Number(i.value); if (w && v >= 0) w.punkte = v; });
+    if (removed.size) state.data.wildarten = state.data.wildarten.filter(w => !removed.has(w.id));
+    $$('[data-newspecies]').forEach(i => addSpecies(i.dataset.newspecies, i.value));
+    closeSheet();
+    if (pwChanged) {
+      await persist('Daten verschlüsselt');
+      await pushSchalen('Schalenwild verschlüsselt', true);
+      if (canMelden()) { try { await changeMeldungen(l => l, 'Meldungen neu verschlüsselt'); } catch { /* egal */ } }
+      await reencryptDocs();
+      state.pwOld = '';
+      if (window.Konto?.isAdmin()) Konto.setDataPw(state.pw, true).catch(() => toast('Neues Passwort konnte nicht im Konten-Server hinterlegt werden – unter „Konten verwalten“ erneut versuchen.', 6000));
+      toast('Daten sind jetzt mit dem Passwort verschlüsselt.', 4000);
+    } else if (meldChanged || JSON.stringify({ s: state.data.schuetzen, w: state.data.wildarten }) !== before) { await persist(meldChanged ? 'Melde-Zugang geändert' : 'Schützen/Punkte geändert'); loadMeldungen(); }
+    else { render(); if (state.pending) pushRemote(); else load(); }
+  });
+}
+
+function shooterCfgRow(s) {
+  const opts = (val, empty) => `<option value="">${empty}</option>` + seasonRange().map(x => `<option value="${x}" ${x === val ? 'selected' : ''}>${x}</option>`).join('');
+  return `<div class="sh-cfg" data-sid="${esc(s.id)}">
+    <input type="text" data-sname value="${esc(s.name)}" placeholder="Kurzname (Liste)" aria-label="Kurzname">
+    <input type="text" data-sfull value="${esc(s.vollname || '')}" placeholder="Voller Name" aria-label="Voller Name">
+    <label>ab <select data-sab>${opts(s.ab, 'immer')}</select></label>
+    <label>bis <select data-sbis>${opts(s.bis, 'offen')}</select></label>
+  </div>`;
+}
+
+/* ================= Sicherung & Wiederherstellung ================= */
+function makeBackup() {
+  return { typ: 'streckenbericht-sicherung', version: 1, erstellt: new Date().toISOString(), niederwild: state.data, schalenwild: state.schalen };
+}
+function saveBackup() {
+  const blob = new Blob([JSON.stringify(makeBackup(), null, 2)], { type: 'application/json' });
+  shareOrDownload(blob, `JagdThuine_Sicherung_${todayISO()}.json`);
+}
+/** Liest Sicherung (neues Format oder alte reine Niederwild-Datei) */
+function parseBackup(obj) {
+  if (obj?.enc) throw new Error('Diese Datei ist verschlüsselt – bitte eine Sicherung aus „Sicherung speichern“ verwenden.');
+  const main = obj?.typ === 'streckenbericht-sicherung' ? obj.niederwild : obj;
+  if (!main || !Array.isArray(main.jagdtage) || !Array.isArray(main.schuetzen)) throw new Error('Unbekanntes Dateiformat');
+  const sw = obj?.typ === 'streckenbericht-sicherung' ? obj.schalenwild : null;
+  return { main: normalize(clone(main)), schalen: sw ? normalizeSchalen(clone(sw)) : null, erstellt: obj?.erstellt };
+}
+/** Spielt einen Stand ein und speichert ihn (mit aktuellem Passwort verschlüsselt) */
+async function restoreData({ main, schalen }, label = 'Daten aus Sicherung eingespielt') {
+  state.data = main;
+  lsSet(LS_DATA, main);
+  await persist(label);
+  if (schalen) {
+    state.schalenOps = [];
+    queueSchalenOp({ type: 'replace', eintraege: schalen.eintraege });
+    await pushSchalen(label);
+  }
+  render();
+}
+
+/* „Passwort vergessen?“ auf dem Sperrbildschirm – nur mit vollem Zugang */
+function openReset() {
+  const cachedMain = lsGet(LS_DATA, null), cachedSch = lsGet(LS_SCHALEN, null);
+  const hasCache = !!(cachedMain && Array.isArray(cachedMain.jagdtage));
+  const box = $('#resetBox');
+  box.hidden = false; $('#lockForm').hidden = true;
+  box.innerHTML = `
+    <h2>Passwort vergessen</h2>
+    <p class="sub" style="text-align:left">Nur für den vollen Zugang (Verwaltung). Du spielst einen bekannten Stand ein und vergibst ein neues Passwort. Danach müssen alle Jäger das neue Passwort einmal eingeben.</p>
+    ${isAdmin() ? '' : `<label class="field" style="text-align:left"><span>Dein GitHub-Token (voller Zugang)</span><input type="password" id="rsToken" placeholder="github_pat_…" autocomplete="off"></label>`}
+    <fieldset style="text-align:left"><legend>Welcher Stand?</legend>
+      ${hasCache ? `<label class="check-row"><input type="radio" name="rsSrc" value="cache" checked> <span><b>Stand auf diesem Gerät</b><small>zuletzt geladen: ${cachedMain.stand ? new Date(cachedMain.stand).toLocaleString('de-DE', { dateStyle: 'medium', timeStyle: 'short' }) : 'unbekannt'}${cachedSch?.eintraege ? ` · ${cachedSch.eintraege.length} Schalenwild-Einträge` : ''}</small></span></label>` : ''}
+      <label class="check-row"><input type="radio" name="rsSrc" value="file" ${hasCache ? '' : 'checked'}> <span><b>Sicherungsdatei einspielen</b><small>aus „Sicherung speichern“</small></span></label>
+      <input type="file" id="rsFile" accept="application/json,.json">
+    </fieldset>
+    <label class="field" style="text-align:left"><span>Neues Passwort (mind. 6 Zeichen)</span><input type="text" id="rsPw" autocomplete="off" autocapitalize="off" autocorrect="off"></label>
+    <label class="field" style="text-align:left"><span>Neues Passwort wiederholen</span><input type="text" id="rsPw2" autocomplete="off" autocapitalize="off" autocorrect="off"></label>
+    <p id="rsMsg" class="err"></p>
+    <button type="button" class="btn block" id="rsGo">Wiederherstellen & neu verschlüsseln</button>
+    <button type="button" class="btn ghost block" id="rsBack">Zurück</button>`;
+  $('#rsBack').addEventListener('click', () => { box.hidden = true; $('#lockForm').hidden = false; });
+  $('#rsGo').addEventListener('click', async () => {
+    const msg = t => { $('#rsMsg').textContent = t; };
+    const pw = $('#rsPw').value.trim();
+    if (pw.length < 6) return msg('Das Passwort muss mindestens 6 Zeichen haben.');
+    if (pw !== $('#rsPw2').value.trim()) return msg('Die beiden Passwörter stimmen nicht überein.');
+    if (!isAdmin()) {
+      const t = $('#rsToken')?.value.trim();
+      if (!t) return msg('Bitte deinen GitHub-Token eintragen.');
+      Object.assign(state.cfg, { token: t, mode: 'voll' }); lsSet(LS_CFG, state.cfg);
+    }
+    let src;
+    try {
+      const mode = $('input[name=rsSrc]:checked')?.value;
+      if (mode === 'cache') src = { main: normalize(clone(cachedMain)), schalen: cachedSch ? normalizeSchalen(clone(cachedSch)) : null };
+      else {
+        const f = $('#rsFile').files[0];
+        if (!f) return msg('Bitte eine Sicherungsdatei auswählen.');
+        src = parseBackup(JSON.parse(await f.text()));
+      }
+    } catch (err) { return msg(err.message); }
+    $('#rsGo').disabled = true; msg('');
+    try {
+      state.pw = pw; state.pwOld = ''; lsSet(LS_PW, pw);
+      state.pending = false; lsSet(LS_PENDING, undefined);
+      await restoreData(src, 'Wiederherstellung mit neuem Passwort');
+      if (state.pending || state.schalenOps.length) throw new Error('Speichern auf GitHub fehlgeschlagen – Token prüfen.');
+      box.hidden = true; $('#lockForm').hidden = false; $('#lock').hidden = true;
+      if (window.Konto?.isAdmin()) Konto.setDataPw(pw, true).catch(() => {});
+      toast('Wiederhergestellt ✓ – neues Passwort ist aktiv.', 4500);
+    } catch (err) { msg(err.message); }
+    finally { $('#rsGo').disabled = false; }
+  });
+}
+
+/* ================= Teilen / Download ================= */
+/** Handy/Tablet? Nur dort das Teilen-Menü nutzen – am PC (Windows/Mac) bietet es kein „Speichern“, dort direkt herunterladen */
+const isMobileDevice = () => /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+/* ---------- PDF direkt in der App anzeigen (Handy) – ohne Teilen-/Speichern-Dialog ---------- */
+let pdfjsReady = null;
+function loadPdfJs() {
+  if (!pdfjsReady) pdfjsReady = loadScript('vendor/pdf.min.js').then(() => { window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'vendor/pdf.worker.min.js'; return window.pdfjsLib; })
+    .catch(e => { pdfjsReady = null; throw e; });
+  return pdfjsReady;
+}
+function closePdfViewer(fromPop = false) {
+  const v = $('#pdfv'); if (!v) return;
+  v._doc?.destroy?.();
+  v.remove(); document.body.style.overflow = '';
+  if (!fromPop && history.state && history.state.pdf) histBack();
+}
+async function showPdf(blob, filename) {
+  closePdfViewer();
+  const title = filename.replace(/\.pdf$/i, '').replace(/_/g, ' ');
+  document.body.insertAdjacentHTML('beforeend', `<div id="pdfv" class="pdfv" role="dialog" aria-modal="true" aria-label="${esc(title)}">
+    <div class="pdfv-bar">
+      <button class="pdfv-btn" id="pdfvClose" aria-label="Schließen">✕</button>
+      <div class="pdfv-title">${esc(title)}</div>
+      <button class="pdfv-btn" id="pdfvShare" aria-label="Teilen oder sichern" title="Teilen / Sichern">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 8l5-5 5 5"/><path d="M5 12v8h14v-8"/></svg>
+      </button>
+    </div>
+    <div class="pdfv-pages" id="pdfvPages"><div class="pdfv-load">PDF wird geöffnet …</div></div>
+  </div>`);
+  document.body.style.overflow = 'hidden';
+  history.pushState({ sb: histLvl() + 1, pdf: true }, '');
+  $('#pdfvClose').addEventListener('click', () => closePdfViewer());
+  $('#pdfvShare').addEventListener('click', () => shareFile(blob, filename));
+  try {
+    const lib = await loadPdfJs();
+    const doc = await lib.getDocument({ data: new Uint8Array(await blob.arrayBuffer()), isEvalSupported: false }).promise;
+    const v = $('#pdfv'); if (!v) { doc.destroy(); return; }
+    v._doc = doc;
+    const box = $('#pdfvPages'); box.innerHTML = '';
+    const cssW = Math.min(box.clientWidth - 16, 900), dpr = Math.min(window.devicePixelRatio || 1, 3);
+    for (let i = 1; i <= doc.numPages; i++) {
+      if (!$('#pdfv')) return;
+      const page = await doc.getPage(i);
+      const base = page.getViewport({ scale: 1 });
+      const vp = page.getViewport({ scale: (cssW / base.width) * dpr * 1.5 }); // etwas höher auflösen → scharf beim Zoomen
+      const c = document.createElement('canvas');
+      c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
+      c.style.width = cssW + 'px'; c.style.height = Math.floor(cssW * base.height / base.width) + 'px';
+      box.appendChild(c);
+      await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+    }
+  } catch (e) {
+    const box = $('#pdfvPages');
+    if (box) box.innerHTML = `<div class="pdfv-load">Das PDF lässt sich hier nicht anzeigen.<br><br><button class="btn" id="pdfvFallback">Stattdessen teilen / sichern</button></div>`;
+    $('#pdfvFallback')?.addEventListener('click', () => shareFile(blob, filename));
+  }
+}
+/** Teilen-Menü (Handy) bzw. Download */
+async function shareFile(blob, filename) {
+  const file = new File([blob], filename, { type: blob.type });
+  if (isMobileDevice() && navigator.canShare?.({ files: [file] })) {
+    try { await navigator.share({ files: [file] }); return; } catch (e) { if (e.name === 'AbortError') return; }
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+async function shareOrDownload(blob, filename) {
+  // Handy: PDFs direkt in der App anzeigen (Teilen/Sichern über den Knopf oben rechts)
+  if (isMobileDevice() && (blob.type === 'application/pdf' || /\.pdf$/i.test(filename))) return showPdf(blob.type ? blob : new Blob([blob], { type: 'application/pdf' }), filename);
+  const file = new File([blob], filename, { type: blob.type });
+  if (isMobileDevice() && navigator.canShare?.({ files: [file] })) {
+    try { await navigator.share({ files: [file] }); return; } // nur die Datei teilen – ein Titel/Text erzeugt auf dem iPhone eine zusätzliche „Text.txt“
+    catch (e) { if (e.name === 'AbortError') return; }
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+
+/* ================= PDF-Export ================= */
+let pdfLibs = null;
+function loadScript(src) {
+  return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => rej(new Error('PDF-Modul nicht geladen')); document.head.appendChild(s); });
+}
+async function getPdf() {
+  if (!pdfLibs) pdfLibs = (async () => {
+    await loadScript('vendor/jspdf.umd.min.js');
+    await loadScript('vendor/jspdf.plugin.autotable.min.js');
+  })();
+  await pdfLibs;
+  return window.jspdf.jsPDF;
+}
+let logoData = null;
+async function getLogo() {
+  if (logoData) return logoData;
+  const r = await fetch('icons/icon-192.png'); const b = await r.blob();
+  logoData = await new Promise(res => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.readAsDataURL(b); });
+  return logoData;
+}
+
+const PDF = { green: [31, 74, 36], ink: [34, 48, 29], muted: [102, 105, 79], soft: [207, 216, 184], paper: [242, 240, 223], brass: [155, 122, 50] };
+
+async function pdfBase(title, season) {
+  const jsPDF = await getPdf();
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+  const logo = await getLogo().catch(() => null);
+  if (logo) doc.addImage(logo, 'PNG', 14, 10, 22, 22);
+  doc.setTextColor(...PDF.muted); doc.setFont('helvetica', 'normal'); doc.setFontSize(9);
+  doc.text('JAGDGEMEINSCHAFT THUINE', 40, 16);
+  doc.setTextColor(...PDF.green); doc.setFont('helvetica', 'bold'); doc.setFontSize(18);
+  doc.text(title, 40, 24);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(...PDF.ink);
+  doc.text(`Jagdjahr ${season}  ·  erstellt am ${dateDE(todayISO())}`, 40, 30);
+  doc.setDrawColor(...PDF.soft); doc.setLineWidth(0.6); doc.line(14, 36, 196, 36);
+  return doc;
+}
+function pdfFooter(doc) {
+  const n = doc.getNumberOfPages();
+  for (let i = 1; i <= n; i++) {
+    doc.setPage(i); doc.setFontSize(8); doc.setTextColor(...PDF.muted);
+    doc.text(`Jagdgemeinschaft Thuine · App „Jagd Thuine“`, 14, 290);
+    doc.text(`Seite ${i} von ${n}`, 196, 290, { align: 'right' });
+  }
+}
+const tableStyle = {
+  theme: 'grid',
+  styles: { font: 'helvetica', fontSize: 9.5, cellPadding: 1.8, lineColor: [201, 203, 171], lineWidth: 0.2, textColor: PDF.ink },
+  headStyles: { fillColor: PDF.green, textColor: [244, 241, 222], fontStyle: 'bold' },
+  footStyles: { fillColor: PDF.soft, textColor: PDF.ink, fontStyle: 'bold' },
+  alternateRowStyles: { fillColor: [247, 246, 236] },
+  margin: { left: 14, right: 14 },
+};
+function sectionTitle(doc, text, y) {
+  if (y > 265) { doc.addPage(); y = 20; }
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(12.5); doc.setTextColor(...PDF.green);
+  doc.text(text, 14, y);
+  return y + 3;
+}
+const numRight = (from = 1, to = 99) => d => { if (d.section !== 'body' && d.column.index >= from && d.column.index <= to) d.cell.styles.halign = 'right'; };
+const safeSeason = s => s.replace('/', '-');
+
+async function exportStrecke(season) {
+  try {
+    toast('PDF wird erstellt …');
+    const st = seasonStats(season);
+    const doc = await pdfBase('Streckenbericht', season);
+    const cols = species().filter(w => st.perSpecies[w.id]);
+    let y = sectionTitle(doc, 'Gesamtstrecke', 45);
+    const hundTotal = sumCounts(st.perSpeciesHund);
+    const hasNt = st.totalNachtrag > 0;
+    doc.autoTable({ ...tableStyle, startY: y,
+      head: [['Wildart', ...(hasNt ? ['Jagdtage', 'Außerhalb'] : []), 'Stück', ...(hundTotal ? ['davon Hund'] : [])]],
+      body: cols.length ? cols.map(w => [w.name, ...(hasNt ? [String(st.perSpeciesTage[w.id] || '–'), String(st.perNachtrag[w.id] || '–')] : []), String(st.perSpecies[w.id]), ...(hundTotal ? [String(st.perSpeciesHund[w.id] || '')] : [])]) : [[{ content: 'Keine Strecke', colSpan: 2 + (hasNt ? 2 : 0) + (hundTotal ? 1 : 0) }]],
+      foot: [['Gesamt', ...(hasNt ? [String(st.totalTage), String(st.totalNachtrag)] : []), String(st.total), ...(hundTotal ? [String(hundTotal)] : [])]],
+      columnStyles: { 1: { halign: 'right' }, 2: { halign: 'right' }, 3: { halign: 'right' }, 4: { halign: 'right' } },
+      tableWidth: hasNt ? 140 : 100, didParseCell: numRight(1),
+    });
+    y = doc.lastAutoTable.finalY + 6;
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(...PDF.muted);
+    doc.text(`${st.days.length} Jagdtage${st.days.length ? `: ${st.days.map(d => dateDE(d.datum)).join(', ')}` : ''}`, 14, y, { maxWidth: 182 });
+    y += 12;
+    y = sectionTitle(doc, 'Strecke je Jagdtag', y);
+    doc.autoTable({ ...tableStyle, startY: y,
+      head: [['Jagdtag', ...cols.map(w => w.name), 'Gesamt']],
+      body: st.days.map(d => { const ds = dayStats(d); return [dateDE(d.datum) + (isVenslage(d) ? '\nmit Venslage*' : isTreibjagd(d) ? '\nGr. Treibjagd**' : ''), ...cols.map(w => ds.perSpecies[w.id] ? String(ds.perSpecies[w.id]) + (ds.perSpeciesHund[w.id] ? ` (${ds.perSpeciesHund[w.id]} H)` : '') : '–'), String(ds.total)]; }),
+      foot: [
+        ...(hasNt ? [['Außerhalb d. Jagdtage', ...cols.map(w => String(st.perNachtrag[w.id] || '–')), String(st.totalNachtrag)]] : []),
+        ['Gesamt', ...cols.map(w => String(st.perSpecies[w.id])), String(st.total)]],
+      columnStyles: Object.fromEntries([...cols.map((_, i) => [i + 1, { halign: 'right' }]), [cols.length + 1, { halign: 'right', fontStyle: 'bold' }]]),
+      didParseCell: numRight(1),
+    });
+    y = doc.lastAutoTable.finalY + 10;
+    if (hasNt) {
+      y = sectionTitle(doc, 'Außerhalb der Jagdtage erlegt', y);
+      doc.autoTable({ ...tableStyle, startY: y,
+        head: [['Datum', 'Wildart', 'Anzahl', 'Erlegt von / Bemerkung']],
+        body: st.nachtraege.map(n => [datumText(n.datum), speciesName(n.art), String(n.anzahl), n.text || '–']),
+        columnStyles: { 0: { cellWidth: 26 }, 2: { halign: 'right', cellWidth: 18 } }, didParseCell: numRight(2, 2),
+      });
+      y = doc.lastAutoTable.finalY + 10;
+    }
+    const notes = [];
+    if (hundTotal) notes.push('H = vom Hund gegriffen (zählt zur Strecke, ohne Punkte).');
+    if (st.days.some(isVenslage)) notes.push('* Jagd mit Venslage: In der Strecke steht nur das im Revier Thuine erlegte Wild.');
+    if (st.days.some(isTreibjagd)) notes.push('** Große Treibjagd: Die Strecke enthält auch das Wild der Gäste.');
+    if (notes.length) { doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...PDF.muted); doc.text(notes.join('  '), 14, doc.lastAutoTable.finalY + 6, { maxWidth: 182 }); }
+    pdfFooter(doc);
+    await shareOrDownload(doc.output('blob'), `Streckenbericht_${safeSeason(season)}.pdf`);
+  } catch (e) { toast('Export fehlgeschlagen: ' + e.message, 4500); }
+}
+
+async function exportKoenig(season) {
+  try {
+    toast('PDF wird erstellt …');
+    const st = seasonStats(season);
+    const doc = await pdfBase('Jagdkönig', season);
+    let y = 45;
+    const top = st.ranking.filter(r => r.rank === 1);
+    if (top.length) {
+      doc.setFillColor(244, 236, 208); doc.setDrawColor(216, 196, 143);
+      doc.roundedRect(14, y - 5, 182, 16, 2, 2, 'FD');
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(13); doc.setTextColor(...PDF.brass);
+      doc.text(`Jagdkönig ${season}: ${top.map(r => shooterName(r.id)).join(', ')}  –  ${fmt(top[0].punkte)} Punkte`, 20, y + 4.5);
+      y += 20;
+    }
+    y = sectionTitle(doc, 'Rangliste', y);
+    const cols = species().filter(w => st.ranking.some(r => r.erlegt[w.id] || r.hund[w.id]));
+    const spw = Math.min(14, (182 - 48 - 40) / Math.max(1, cols.length)); // Breite je Wildart-Spalte
+    doc.autoTable({ ...tableStyle, startY: y,
+      head: [['Platz', 'Schütze', ...cols.map(w => w.name), 'Stück', 'Punkte', 'Tageskönig']],
+      body: st.ranking.map(r => [`${r.rank}.`, shooterName(r.id), ...cols.map(w => { const e = r.erlegt[w.id] || 0, h = r.hund[w.id] || 0; return e + h ? `${e + h}${h ? ` (${h} H)` : ''}` : '–'; }), String(r.stueck), fmt(r.punkte), r.siege ? `${r.siege}×` : '–']),
+      columnStyles: Object.fromEntries([[0, { halign: 'right', cellWidth: 12 }], [1, { cellWidth: 'auto', minCellWidth: 36 }], ...cols.map((_, i) => [i + 2, { halign: 'right', cellWidth: spw }]), [cols.length + 2, { halign: 'right', cellWidth: 11 }], [cols.length + 3, { halign: 'right', fontStyle: 'bold', cellWidth: 13 }], [cols.length + 4, { halign: 'center', cellWidth: 12 }]]),
+      didParseCell: d => {
+        numRight(2, cols.length + 3)(d);
+        // Kopfzeile: Wildarten, Stück, Punkte, Tageskönig senkrecht – kein Umbruch mitten im Wort
+        if (d.section === 'head' && d.column.index >= 2) {
+          d.cell._vert = d.cell.raw; d.cell.text = [''];
+          d.cell.styles.minCellHeight = 25;
+        }
+        if (d.section === 'body' && d.column.index >= 2 && d.column.index < cols.length + 2) { d.cell.styles.fontSize = spw < 11 ? 7.5 : 8.5; d.cell.styles.cellPadding = { top: 2, bottom: 2, left: 1, right: 1.5 }; }
+      },
+      didDrawCell: d => {
+        if (d.section !== 'head' || !d.cell._vert) return;
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(8.5); doc.setTextColor(255, 255, 255);
+        doc.text(String(d.cell._vert), d.cell.x + d.cell.width / 2 + 1.3, d.cell.y + d.cell.height - 2.5, { angle: 90 });
+      },
+    });
+    y = doc.lastAutoTable.finalY + 10;
+    y = sectionTitle(doc, 'Einzelnachweis je Schütze', y);
+    const pm = ptsMap();
+    const body = [];
+    for (const r of st.ranking) {
+      body.push([{ content: `${r.rank}. ${shooterName(r.id)}  –  ${fmt(r.punkte)} Punkte, ${r.stueck} Stück`, colSpan: 3, styles: { fillColor: PDF.soft, fontStyle: 'bold' } }]);
+      for (const t of r.tage) {
+        const parts = species().filter(w => t.erlegt[w.id] || t.hund[w.id]).map(w => {
+          const e = t.erlegt[w.id] || 0, h = t.hund[w.id] || 0;
+          return [e ? `${e}× ${w.name} (${fmt(e * pm[w.id])} P.)` : '', h ? `${h}× ${w.name} vom Hund (0 P.)` : ''].filter(Boolean).join(', ');
+        });
+        body.push([dateDE(t.datum) + (t.art === 'venslage' ? '\nmit Venslage' : t.art === 'treibjagd' ? '\nGr. Treibjagd' : ''), parts.join(', '), fmt(t.punkte)]);
+      }
+    }
+    doc.autoTable({ ...tableStyle, startY: y, head: [['Jagdtag', 'Erlegt', 'Punkte']], body, didParseCell: numRight(2, 2),
+      alternateRowStyles: {}, columnStyles: { 0: { cellWidth: 26 }, 2: { halign: 'right', cellWidth: 20 } } });
+    y = doc.lastAutoTable.finalY + 6;
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...PDF.muted);
+    if (y > 280) { doc.addPage(); y = 20; }
+    doc.text(`Punkte: ${species().map(w => `${w.name} ${fmt(w.punkte)}`).join(', ')}. H = vom Hund gegriffen (zählt zur Strecke, ohne Punkte). Gleiche Punktzahl = gleicher Platz. Gewertet wird nur die Stammmannschaft, Gäste und Venslager Jäger zählen nicht mit.`, 14, y, { maxWidth: 182 });
+    pdfFooter(doc);
+    await shareOrDownload(doc.output('blob'), `Jagdkoenig_${safeSeason(season)}.pdf`);
+  } catch (e) { toast('Export fehlgeschlagen: ' + e.message, 4500); }
+}
+
+async function exportSchalen(season) {
+  try {
+    toast('PDF wird erstellt …');
+    const st = schalenStats(season);
+    const plan = wildbretPlan();
+    const doc = await pdfBase('Schalenwild', season);
+    let y = 45;
+    const arten = Object.keys(SCHALEN).filter(a => { const t = st.tot(a); return t.erlegt + t.fallwild; });
+    if (!arten.length) { doc.setFont('helvetica', 'normal'); doc.setFontSize(11); doc.setTextColor(...PDF.muted); doc.text('In diesem Jagdjahr wurde noch kein Schalenwild erlegt.', 14, y); y += 10; }
+    for (const art of arten) {
+      y = sectionTitle(doc, SCHALEN[art].name, y);
+      const t = st.tot(art);
+      doc.autoTable({ ...tableStyle, startY: y, tableWidth: 120,
+        head: [['Kategorie', 'Erlegt', 'Fallwild', 'Gesamt']],
+        body: (b => b.length ? b : [[{ content: 'Keine Strecke', colSpan: 4 }]])(SCHALEN[art].kat.map(([k, l]) => ({ l, c: st.cnt[art]?.[k] || { erlegt: 0, fallwild: 0 } })).filter(r => r.c.erlegt + r.c.fallwild).map(({ l, c }) => [l, String(c.erlegt || '–'), String(c.fallwild || '–'), String(c.erlegt + c.fallwild)])),
+        foot: [['Gesamt', String(t.erlegt), String(t.fallwild), String(t.erlegt + t.fallwild)]],
+        columnStyles: { 1: { halign: 'right' }, 2: { halign: 'right' }, 3: { halign: 'right', fontStyle: 'bold' } }, didParseCell: numRight(1),
+      });
+      y = doc.lastAutoTable.finalY + 10;
+    }
+    y = sectionTitle(doc, 'Erlegt', y);
+    doc.autoTable({ ...tableStyle, startY: y,
+      head: [['Datum', 'Wildart', 'Kategorie', 'Schütze', 'Wildbret an', 'Bemerkung']],
+      body: st.erlegt.length ? st.erlegt.map(x => [datumText(x.datum), SCHALEN[x.art].name, katName(x.art, x.kat), schuetzeText(x), wildbretText(x, plan) || '–', x.bemerkung || '–']) : [[{ content: 'Keine Erlegungen', colSpan: 6 }]],
+      columnStyles: { 0: { cellWidth: 24 } },
+    });
+    y = doc.lastAutoTable.finalY + 10;
+    y = sectionTitle(doc, 'Fallwild', y);
+    doc.autoTable({ ...tableStyle, startY: y,
+      head: [['Datum', 'Wildart', 'Kategorie', 'Ursache', 'Bemerkung']],
+      body: st.fallwild.length ? st.fallwild.map(x => [datumText(x.datum), SCHALEN[x.art].name, katName(x.art, x.kat), x.ursache || '–', x.bemerkung || '–']) : [[{ content: 'Kein Fallwild', colSpan: 5 }]],
+      columnStyles: { 0: { cellWidth: 24 } },
+    });
+    const sh = Object.entries(st.perShooter);
+    if (sh.length) {
+      y = doc.lastAutoTable.finalY + 10;
+      y = sectionTitle(doc, 'Je Schütze', y);
+      doc.autoTable({ ...tableStyle, startY: y,
+        head: [['Schütze', 'Reh', 'Dam', 'Sau', 'Erlegt']],
+        body: sh.sort((a, b) => (b[1].reh + b[1].damm + b[1].schwarz) - (a[1].reh + a[1].damm + a[1].schwarz)).map(([id, p]) => [shooterName(id), String(p.reh || '–'), String(p.damm || '–'), String(p.schwarz || '–'), p.list.map(x => `${katName(x.art, x.kat)} (${datumText(x.datum)})`).join(', ')]),
+        columnStyles: { 1: { halign: 'right', cellWidth: 14 }, 2: { halign: 'right', cellWidth: 14 }, 3: { halign: 'right', cellWidth: 14 } }, didParseCell: numRight(1, 3),
+      });
+    }
+    pdfFooter(doc);
+    await shareOrDownload(doc.output('blob'), `Schalenwild_${safeSeason(season)}.pdf`);
+  } catch (e) { toast('Export fehlgeschlagen: ' + e.message, 4500); }
+}
+
+async function exportGesamt(season) {
+  try {
+    toast('PDF wird erstellt …');
+    const st = seasonStats(season);
+    const sw = schalenStats(season);
+    const doc = await pdfBase('Gesamtstreckenbericht', season);
+    // Niederwild
+    let y = sectionTitle(doc, 'Niederwild', 45);
+    const rows = species().filter(w => st.perSpecies[w.id]).map(w => [w.name, String(st.perSpecies[w.id])]);
+    doc.autoTable({ ...tableStyle, startY: y, tableWidth: 100,
+      head: [['Wildart', 'Stück']],
+      body: rows.length ? rows : [[{ content: 'Keine Strecke', colSpan: 2 }]],
+      foot: [['Gesamt Niederwild', String(st.total)]],
+      columnStyles: { 1: { halign: 'right' } }, didParseCell: numRight(1),
+    });
+    y = doc.lastAutoTable.finalY + 12;
+    // Schalenwild
+    y = sectionTitle(doc, 'Schalenwild', y);
+    const body = [];
+    for (const art of Object.keys(SCHALEN).filter(a => { const t = sw.tot(a); return t.erlegt + t.fallwild; })) {
+      const t = sw.tot(art);
+      body.push([{ content: SCHALEN[art].name, colSpan: 4, styles: { fillColor: PDF.soft, fontStyle: 'bold' } }]);
+      const cats = SCHALEN[art].kat.filter(([k]) => { const c = sw.cnt[art]?.[k]; return c && (c.erlegt || c.fallwild); });
+      if (!cats.length) body.push([{ content: 'Keine Strecke', colSpan: 4 }]);
+      cats.forEach(([k, l]) => { const c = sw.cnt[art][k]; body.push([l, String(c.erlegt || '–'), String(c.fallwild || '–'), String(c.erlegt + c.fallwild)]); });
+      body.push([{ content: `Summe ${SCHALEN[art].name}`, styles: { fontStyle: 'bold' } }, String(t.erlegt), String(t.fallwild), { content: String(t.erlegt + t.fallwild), styles: { fontStyle: 'bold' } }]);
+    }
+    if (!body.length) body.push([{ content: 'Keine Strecke', colSpan: 4 }]);
+    const all = Object.keys(SCHALEN).map(a => sw.tot(a)).reduce((a, c) => ({ erlegt: a.erlegt + c.erlegt, fallwild: a.fallwild + c.fallwild }), { erlegt: 0, fallwild: 0 });
+    doc.autoTable({ ...tableStyle, startY: y, tableWidth: 140, alternateRowStyles: {},
+      head: [['Kategorie', 'Erlegt', 'Fallwild', 'Gesamt']],
+      body,
+      foot: [['Gesamt Schalenwild', String(all.erlegt), String(all.fallwild), String(all.erlegt + all.fallwild)]],
+      columnStyles: { 1: { halign: 'right' }, 2: { halign: 'right' }, 3: { halign: 'right' } }, didParseCell: numRight(1),
+    });
+    y = doc.lastAutoTable.finalY + 8;
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...PDF.muted);
+    doc.text('Niederwild inkl. Wild, das außerhalb der Jagdtage erlegt wurde. Bei der Jagd mit Venslage zählt nur das im Revier Thuine erlegte Wild.', 14, y, { maxWidth: 182 });
+    pdfFooter(doc);
+    await shareOrDownload(doc.output('blob'), `Gesamtstrecke_${safeSeason(season)}.pdf`);
+  } catch (e) { toast('Export fehlgeschlagen: ' + e.message, 4500); }
+}
+
+/* ================= Navigation ================= */
+/** Bereiche: Start → Niederwild (Strecke, Jagdtage, Jagdkönig) oder Schalenwild (Reh & Damm) */
+const sectionOf = tab => tab === 'start' ? 'start' : tab.startsWith('schalen') ? 'schalen' : tab === 'berichte' ? 'berichte' : tab === 'termine' ? 'termine' : 'nieder';
+function switchTab(tab, fromPop = false) {
+  if (tab === 'schalen') tab = `schalen-${state.schalenArt || 'reh'}`;
+  if (tab.startsWith('schalen-')) state.schalenArt = tab.slice(8);
+  const sec = sectionOf(tab);
+  if (!fromPop) {
+    if (sec !== 'start' && histLvl() < 1) history.pushState({ sb: 1 }, '');
+    else if (sec === 'start' && histLvl() === 1 && !(history.state && history.state.sheet)) histBack();
+  }
+  state.tab = tab;
+  $('.tabbar').hidden = sec === 'start';
+  $$('.tab').forEach(t => { t.classList.toggle('active', t.dataset.tab === tab); t.hidden = !!t.dataset.sec && t.dataset.sec !== sec; });
+  const view = tab.startsWith('schalen') ? 'schalen' : tab;
+  $$('.view').forEach(v => (v.hidden = v.dataset.view !== view));
+  if (view === 'schalen') renderSchalen();
+  document.body.classList.toggle('on-start', sec === 'start');
+  if (tab === 'start') renderStart();
+  if (tab === 'berichte') renderBerichte();
+  if (tab === 'termine') renderTermine();
+  window.scrollTo({ top: 0 });
+}
+
+/* ================= Dokumente (z. B. Protokoll der Hauptversammlung) =================
+   PDFs liegen im Haupt-Repository unter data/dokumente/, mit dem Passwort verschlüsselt
+   (Format: "SBE1" + Salt 16 + IV 12 + AES-GCM-Chiffrat). Die Liste steht in den (verschlüsselten) Hauptdaten. */
+const DOC_DIR = 'data/dokumente';
+const DOC_MAX = 20 * 1024 * 1024;
+const DOC_MAGIC = [83, 66, 69, 49]; // "SBE1"
+async function encryptBytes(bytes, pw) {
+  const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveKey(pw, salt, 150000);
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, bytes));
+  const out = new Uint8Array(4 + 16 + 12 + ct.length);
+  out.set(DOC_MAGIC, 0); out.set(salt, 4); out.set(iv, 20); out.set(ct, 32);
+  return out;
+}
+const isEncDoc = b => b.length > 32 && DOC_MAGIC.every((v, i) => b[i] === v);
+async function decryptBytes(b) {
+  if (!isEncDoc(b)) return b; // unverschlüsselt (Zeit ohne Passwort)
+  for (const pw of [state.pw, state.pwOld].filter(Boolean)) {
+    try { const key = await deriveKey(pw, b.subarray(4, 20), 150000); return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b.subarray(20, 32) }, key, b.subarray(32))); } catch { /* nächstes */ }
+  }
+  throw new Error('Dokument lässt sich nicht entschlüsseln (Passwort geändert?).');
+}
+const docsOf = season => (state.data?.dokumente || []).filter(d => d.season === season);
+/** Dokument holen: Admin direkt über die API (sofort aktuell), sonst über GitHub Pages bzw. raw */
+async function fetchDocBytes(d) {
+  const { owner, repo, branch } = state.cfg;
+  const tries = [];
+  if (isAdmin()) tries.push(() => fetch(ghFileUrl(repo, d.datei) + `&t=${Date.now()}`, { headers: { ...ghHeaders(true), Accept: 'application/vnd.github.raw+json' }, cache: 'no-store' }));
+  tries.push(() => fetch(`${d.datei}?t=${Date.now()}`, { cache: 'no-store' }));
+  if (owner && repo) tries.push(() => fetch(`https://raw.githubusercontent.com/${owner}/${repo}/${branch || 'main'}/${repoPath(repo, d.datei)}?t=${Date.now()}`, { cache: 'no-store' }));
+  for (const t of tries) {
+    try { const r = await t(); if (r.ok) { const b = new Uint8Array(await r.arrayBuffer()); if (b.length) return b; } } catch { /* nächster Weg */ }
+  }
+  throw new Error('Dokument nicht erreichbar – nach dem Hochladen kann es 1–2 Minuten dauern.');
+}
+async function downloadDoc(d) {
+  toast('Lade Dokument …', 2000);
+  try {
+    const pdf = await decryptBytes(await fetchDocBytes(d));
+    const name = `${d.titel} ${d.season.replace('/', '-')}`.replace(/[^\wäöüÄÖÜß .-]+/g, '').trim() + '.pdf';
+    await shareOrDownload(new Blob([pdf], { type: 'application/pdf' }), name);
+  } catch (e) { toast(e.message, 4500); }
+}
+async function putDocFile(path, bytes, message, sha) {
+  const body = { message, content: bytesToB64(bytes), branch: state.cfg.branch || 'main' };
+  if (sha) body.sha = sha;
+  const r = await fetch(ghFileUrl(state.cfg.repo, path, false), { method: 'PUT', headers: { ...ghHeaders(true), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!r.ok) throw new Error(r.status === 401 || r.status === 403 ? 'Keine Schreibrechte (Token prüfen)' : `Hochladen fehlgeschlagen (GitHub ${r.status})`);
+  return (await r.json()).content?.sha;
+}
+function openDocUpload(season) {
+  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'application/pdf,.pdf';
+  inp.addEventListener('change', () => {
+    const f = inp.files[0]; if (!f) return;
+    if (!/\.pdf$/i.test(f.name) && f.type !== 'application/pdf') { toast('Bitte eine PDF-Datei wählen.'); return; }
+    if (f.size > DOC_MAX) { toast('Die Datei ist größer als 20 MB.', 4000); return; }
+    openSheet(`Dokument ${season}`, `
+      <p class="hint">Datei: <b>${esc(f.name)}</b> (${(f.size / 1024 / 1024).toFixed(1).replace('.', ',')} MB)</p>
+      <label class="field"><span>Bezeichnung</span><input id="docTitel" value="Protokoll Hauptversammlung" autocomplete="off"></label>
+      <p class="hint">Das Dokument wird mit dem Passwort der Jagdgemeinschaft verschlüsselt und ist danach für alle auf der Seite Streckenberichte beim Jagdjahr ${esc(season)} abrufbar.</p>`,
+      `<button class="btn secondary" data-close>Abbrechen</button><button class="btn" id="docSave">Hochladen</button>`);
+    $('#docSave').addEventListener('click', async e => {
+      const titel = $('#docTitel').value.trim() || 'Dokument';
+      const btn = e.currentTarget; btn.disabled = true; btn.textContent = 'Wird hochgeladen …';
+      try {
+        const raw = new Uint8Array(await f.arrayBuffer());
+        const bytes = state.pw ? await encryptBytes(raw, state.pw) : raw;
+        const id = `d-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+        const datei = `${DOC_DIR}/${id}.bin`;
+        const sha = await putDocFile(datei, bytes, `Dokument hochgeladen: ${titel} ${season}`);
+        state.data.dokumente = [...(state.data.dokumente || []), { id, season, titel, datei, sha, bytes: f.size, datum: todayISO() }];
+        closeSheet();
+        await persist(`Dokument: ${titel} ${season}`);
+        if (state.tab === 'berichte') renderBerichte();
+      } catch (err) { btn.disabled = false; btn.textContent = 'Hochladen'; toast(err.message, 4500); }
+    });
+  });
+  inp.click();
+}
+async function deleteDoc(id) {
+  const d = (state.data.dokumente || []).find(x => x.id === id); if (!d) return;
+  try {
+    let sha = d.sha;
+    if (!sha) { const g = await fetch(ghFileUrl(state.cfg.repo, d.datei) + `&t=${Date.now()}`, { headers: ghHeaders(true), cache: 'no-store' }); if (g.ok) sha = (await g.json()).sha; }
+    if (sha) {
+      const r = await fetch(ghFileUrl(state.cfg.repo, d.datei, false), { method: 'DELETE', headers: { ...ghHeaders(true), 'Content-Type': 'application/json' }, body: JSON.stringify({ message: `Dokument gelöscht: ${d.titel} ${d.season}`, sha, branch: state.cfg.branch || 'main' }) });
+      if (!r.ok && r.status !== 404) throw new Error(`Löschen fehlgeschlagen (GitHub ${r.status})`);
+    }
+    state.data.dokumente = state.data.dokumente.filter(x => x.id !== id);
+    await persist(`Dokument gelöscht: ${d.titel} ${d.season}`);
+    if (state.tab === 'berichte') renderBerichte();
+  } catch (e) { toast(e.message, 4500); }
+}
+/** Nach Passwortwechsel: alle Dokumente mit dem neuen Passwort neu verschlüsseln */
+async function reencryptDocs() {
+  const docs = state.data.dokumente || [];
+  if (!docs.length || !state.pw) return;
+  let ok = 0;
+  for (const d of docs) {
+    try {
+      const pdf = await decryptBytes(await fetchDocBytes(d));
+      d.sha = await putDocFile(d.datei, await encryptBytes(pdf, state.pw), `Dokument neu verschlüsselt: ${d.titel} ${d.season}`, d.sha);
+      ok++;
+    } catch { /* bleibt mit altem Passwort – Hinweis unten */ }
+  }
+  await persist('Dokumente neu verschlüsselt');
+  if (ok < docs.length) toast(`${docs.length - ok} Dokument(e) konnten nicht neu verschlüsselt werden – bitte neu hochladen.`, 6000);
+}
+
+/* ================= Termine ================= */
+const TERMIN_ARTEN = {
+  jagdtag: 'Jagdtag Niederwild', treibjagd: 'Große Treibjagd', venslage: 'Jagd mit Venslage', drueckjagd: 'Drückjagd / Ansitz',
+  hv: 'Hauptversammlung', arbeit: 'Arbeitseinsatz', schiessen: 'Übungsschießen',
+  gruenkohl: 'Grünkohlessen', leberessen: 'Leberessen', bockvertrinken: 'Bockvertrinken', hirschvertrinken: 'Hirschvertrinken', sonst: 'Sonstiges',
+};
+const terminTitel = t => t.titel || TERMIN_ARTEN[t.art] || 'Termin';
+const terminLeitung = t => t.leitungGruppe ? gruppeLabel(t.leitungGruppe).replace(/^\d+\.\s*/, '') : t.leitungId ? shooterName(t.leitungId) : (t.leitung || '');
+/* Bei Jagden heißt es „Jagdleitung“, bei allen anderen Terminen (Essen, Vertrinken, Versammlung …) „Organisation“ */
+const JAGD_ARTEN = ['jagdtag', 'treibjagd', 'venslage', 'drueckjagd'];
+const leitungArt = t => JAGD_ARTEN.includes(t.art) ? 'Jagdleitung' : 'Organisator';
+const sortTermine = l => [...l].sort((a, b) => (a.datum + (a.zeit || '')).localeCompare(b.datum + (b.zeit || '')));
+/** vorbei: 4 Stunden nach Beginn bzw. (ohne Uhrzeit) ab dem Folgetag */
+const terminVorbei = t => { if (!t.zeit) return t.datum < todayISO(); const [y, m, d] = t.datum.split('-').map(Number), [h, mi] = t.zeit.split(':').map(Number); return Date.now() > new Date(y, m - 1, d, h + 4, mi).getTime(); };
+const kommendeTermine = () => sortTermine((state.data?.termine || []).filter(t => !terminVorbei(t)));
+function inTagen(iso) {
+  const [y, m, d] = iso.split('-').map(Number), [ty, tm, td] = todayISO().split('-').map(Number);
+  const n = Math.round((new Date(y, m - 1, d) - new Date(ty, tm - 1, td)) / 864e5);
+  return n === 0 ? 'heute' : n === 1 ? 'morgen' : `in ${n} Tagen`;
+}
+function terminCard(t, admin) {
+  const [y, m, d] = t.datum.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  const past = terminVorbei(t);
+  const lei = terminLeitung(t);
+  return `<div class="card tm-card ${past ? 'past' : ''}" data-tm="${esc(t.id)}">
+    <div class="tm-date"><span class="tm-wd">${dt.toLocaleDateString('de-DE', { weekday: 'short' })}</span><span class="tm-d">${d}</span><span class="tm-m">${dt.toLocaleDateString('de-DE', { month: 'short' })}</span></div>
+    <div class="tm-body">
+      <div class="tm-title">${esc(terminTitel(t))}${!past ? ` <small>${inTagen(t.datum)}</small>` : ''}</div>
+      ${t.zeit || t.ort ? `<div class="tm-line">🕗 ${esc([t.zeit ? t.zeit + ' Uhr' : '', t.ort].filter(Boolean).join(' · '))}</div>` : ''}
+      ${lei ? `<div class="tm-line">👤 ${leitungArt(t)}: <b>${esc(lei)}</b></div>` : ''}
+      ${t.besonderheit ? `<div class="tm-note">${esc(t.besonderheit)}</div>` : ''}
+      ${!past ? `<div class="tm-actions"><button class="btn secondary" data-ics="${esc(t.id)}">📅 In Kalender</button>${admin ? `<button class="btn ghost" data-tmedit="${esc(t.id)}">Bearbeiten</button>` : ''}</div>` : (admin ? `<div class="tm-actions"><button class="btn ghost" data-tmedit="${esc(t.id)}">Bearbeiten</button></div>` : '')}
+    </div>
+  </div>`;
+}
+function renderTermine() {
+  const el = $('#view-termine');
+  if (!el || !state.data) return;
+  const admin = isAdmin();
+  const kommend = kommendeTermine();
+  const vergangen = sortTermine(state.data.termine.filter(terminVorbei)).reverse();
+  const vSeasons = [...new Set(vergangen.map(t => seasonOf(t.datum)))].sort().reverse();
+  if (!vSeasons.includes(state.tmPastSeason)) state.tmPastSeason = vSeasons[0];
+  el.innerHTML = `
+    <h2 class="section" style="margin-top:4px">Termine</h2>
+    ${admin ? '<div class="btn-row tm-admin"><button class="btn" id="tmNew">+ Termin eintragen</button><button class="btn secondary" id="tmImport">Aus .ics importieren</button></div>' : ''}
+    ${kommend.length ? kommend.map(t => terminCard(t, admin)).join('') : '<div class="card pad empty"><img src="icons/logo.png" alt=""><p>Zurzeit sind keine Termine eingetragen.</p></div>'}
+    ${vergangen.length ? `<details class="tm-past" ${state.tmPastOpen ? 'open' : ''}><summary>Vergangene Termine (${vergangen.length})</summary>
+      <label class="field tm-season"><span>Jagdjahr</span><select id="tmPastSeason">${vSeasons.map(x => `<option value="${x}" ${x === state.tmPastSeason ? 'selected' : ''}>${x} (${vergangen.filter(t => seasonOf(t.datum) === x).length})</option>`).join('')}</select></label>
+      ${vergangen.filter(t => seasonOf(t.datum) === state.tmPastSeason).map(t => terminCard(t, admin)).join('')}</details>` : ''}`;
+  $('#tmNew')?.addEventListener('click', () => openTermin(null));
+  $('#tmImport')?.addEventListener('click', pickIcs);
+  $('.tm-past')?.addEventListener('toggle', e => { state.tmPastOpen = e.target.open; });
+  $('#tmPastSeason')?.addEventListener('change', e => { state.tmPastSeason = e.target.value; state.tmPastOpen = true; renderTermine(); });
+  $$('[data-tmedit]', el).forEach(b => b.addEventListener('click', () => openTermin(b.dataset.tmedit)));
+  $$('[data-ics]', el).forEach(b => b.addEventListener('click', () => { const t = state.data.termine.find(x => x.id === b.dataset.ics); if (t) terminToCalendar(t); }));
+}
+function openTermin(id) {
+  const ex = id ? state.data.termine.find(t => t.id === id) : null;
+  const t = Object.assign({ datum: todayISO(), zeit: '', art: 'jagdtag', titel: '', ort: '', leitungGruppe: '', leitungId: '', leitung: '', besonderheit: '' }, ex || {});
+  const members = state.data.schuetzen.filter(s => isMember(s, seasonOf(t.datum)));
+  const leiSel = t.leitungGruppe ? `grp:${t.leitungGruppe}` : t.leitungId || (t.leitung ? '__frei' : '');
+  openSheet(ex ? 'Termin bearbeiten' : 'Neuer Termin', `
+    <div class="grid2">
+      <label class="field"><span>Datum</span><input type="date" id="tmDatum" value="${esc(t.datum)}"></label>
+      <label class="field"><span>Uhrzeit</span><input type="time" id="tmZeit" value="${esc(t.zeit)}"></label>
+    </div>
+    <label class="field"><span>Art</span><select id="tmArt">${Object.entries(TERMIN_ARTEN).map(([k, v]) => `<option value="${k}" ${k === t.art ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+    <label class="field"><span>Eigene Bezeichnung (optional)</span><input id="tmTitel" value="${esc(t.titel)}" placeholder="sonst: Art wie oben"></label>
+    <label class="field"><span>Treffpunkt</span><input id="tmOrt" value="${esc(t.ort)}" placeholder="z. B. Hof Schmees"></label>
+    <label class="field"><span id="tmLeiLbl">${leitungArt(t)}</span><select id="tmLeiSel">
+      <option value="">–</option>
+      <optgroup label="Gruppen">${wvGruppen().map(g => `<option value="grp:${g.id}" ${`grp:${g.id}` === leiSel ? 'selected' : ''}>${esc(gruppeLabel(g.id))}</option>`).join('')}</optgroup>
+      <optgroup label="Einzelne Schützen">${members.map(s => `<option value="${esc(s.id)}" ${s.id === leiSel ? 'selected' : ''}>${esc(s.vollname || s.name)}</option>`).join('')}</optgroup>
+      <option value="__frei" ${leiSel === '__frei' ? 'selected' : ''}>Andere (Freitext) …</option></select></label>
+    <label class="field" id="tmLeiFreiWrap" ${leiSel === '__frei' ? '' : 'hidden'}><span>Wer?</span><input id="tmLeiFrei" value="${esc(t.leitung)}" placeholder="z. B. Hegering Lingen"></label>
+    <label class="field"><span>Besonderheit (optional)</span><textarea id="tmBes" rows="3" placeholder="z. B. Signalfarbe Pflicht, Gäste bitte anmelden">${esc(t.besonderheit)}</textarea></label>`,
+    `${ex ? '<button class="btn danger" id="tmDel">Löschen</button>' : '<button class="btn secondary" data-close>Abbrechen</button>'}<button class="btn" id="tmSave">Speichern</button>`);
+  $('#tmLeiSel').addEventListener('change', e => { $('#tmLeiFreiWrap').hidden = e.target.value !== '__frei'; });
+  $('#tmArt').addEventListener('change', e => { $('#tmLeiLbl').textContent = leitungArt({ art: e.target.value }); });
+  $('#tmSave').addEventListener('click', () => {
+    const datum = $('#tmDatum').value;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(datum)) { toast('Bitte ein Datum wählen.'); return; }
+    const sel = $('#tmLeiSel').value;
+    const rec = { id: ex?.id || `t-${Date.now().toString(36)}`, datum, zeit: $('#tmZeit').value, art: $('#tmArt').value, titel: $('#tmTitel').value.trim(),
+      ort: $('#tmOrt').value.trim(), leitungGruppe: sel.startsWith('grp:') ? sel.slice(4) : '', leitungId: sel && sel !== '__frei' && !sel.startsWith('grp:') ? sel : '', leitung: sel === '__frei' ? $('#tmLeiFrei').value.trim() : '', besonderheit: $('#tmBes').value.trim() };
+    Object.keys(rec).forEach(k => { if (rec[k] === '') delete rec[k]; });
+    state.data.termine = ex ? state.data.termine.map(x => x.id === ex.id ? rec : x) : [...state.data.termine, rec];
+    closeSheet(); persist(`Termin: ${terminTitel(rec)} ${dateDE(datum)}`); renderTermine();
+  });
+  $('#tmDel')?.addEventListener('click', e => {
+    const b = e.currentTarget;
+    if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Wirklich löschen?'; return; }
+    state.data.termine = state.data.termine.filter(x => x.id !== ex.id);
+    closeSheet(); persist(`Termin gelöscht: ${terminTitel(ex)} ${dateDE(ex.datum)}`); renderTermine();
+  });
+}
+/* ---------- Erinnerung 60 Minuten vorher (pro Gerät abschaltbar) ---------- */
+const erinnerungAn = () => state.cfg.erinnerung !== false;
+const terminStart = t => { if (!t.zeit) return null; const [y, m, d] = t.datum.split('-').map(Number), [h, mi] = t.zeit.split(':').map(Number); return new Date(y, m - 1, d, h, mi); };
+function baldTermin() {
+  if (!erinnerungAn()) return null;
+  const now = Date.now();
+  return kommendeTermine().map(t => ({ t, ms: terminStart(t) - now })).find(x => x.t.zeit && x.ms > -15 * 60e3 && x.ms <= 60 * 60e3) || null;
+}
+function erinnerungBanner() {
+  const b = baldTermin(); if (!b) return '';
+  const min = Math.max(0, Math.round(b.ms / 60e3)), t = b.t;
+  return `<button class="bald" data-go="termine"><span aria-hidden="true">⏰</span><span><b>${min ? `In ${min} Min.` : 'Jetzt'}: ${esc(terminTitel(t))}</b>
+    <small>${esc([t.zeit + ' Uhr', t.ort, terminLeitung(t)].filter(Boolean).join(' · '))}</small></span></button>`;
+}
+setInterval(() => { if (state.tab === 'start' && $('#sheet').hidden && !$('#pdfv')) renderStart(); }, 60e3);
+
+/* ---------- Import aus Kalenderdatei (.ics) ---------- */
+function parseIcs(text) {
+  const lines = text.replace(/\r\n?/g, '\n').replace(/\n[ \t]/g, '').split('\n'); // gefaltete Zeilen zusammenführen
+  const unesc = v => v.replace(/\\n/gi, '\n').replace(/\\([,;\\])/g, '$1').trim();
+  const events = []; let ev = null, depth = 0;
+  for (const line of lines) {
+    if (line === 'BEGIN:VEVENT') { ev = {}; depth = 0; continue; }
+    if (!ev) continue;
+    if (line.startsWith('BEGIN:')) { depth++; continue; } // z. B. VALARM überspringen
+    if (line.startsWith('END:') && depth) { depth--; continue; }
+    if (line === 'END:VEVENT') { events.push(ev); ev = null; continue; }
+    if (depth) continue;
+    const i = line.indexOf(':'); if (i < 0) continue;
+    const [name, ...params] = line.slice(0, i).split(';');
+    ev[name.toUpperCase()] = { value: line.slice(i + 1), params: params.join(';') };
+  }
+  return events.map(e => {
+    const ds = e.DTSTART?.value; if (!ds) return null;
+    let datum, zeit = '';
+    const m = ds.match(/^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})\d{0,2}(Z)?)?$/);
+    if (!m) return null;
+    if (m[4] && m[6]) { // UTC → Ortszeit
+      const d = new Date(Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5]));
+      datum = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      zeit = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    } else { datum = `${m[1]}-${m[2]}-${m[3]}`; if (m[4]) zeit = `${m[4]}:${m[5]}`; }
+    const titel = unesc(e.SUMMARY?.value || '').replace(/^JG Thuine:\s*/i, '') || 'Termin';
+    let desc = unesc(e.DESCRIPTION?.value || '');
+    const t = { uid: e.UID?.value || '', datum, zeit, titel, ort: unesc(e.LOCATION?.value || ''), wiederholt: !!e.RRULE };
+    const low = titel.toLowerCase();
+    t.art = /grünkohl|gruenkohl|kohl/.test(low) ? 'gruenkohl' : /leber/.test(low) ? 'leberessen' : /bock.*vertrink|vertrink.*bock/.test(low) ? 'bockvertrinken'
+      : /hirsch.*vertrink|vertrink.*hirsch/.test(low) ? 'hirschvertrinken' : /venslage/.test(low) ? 'venslage' : /treibjagd/.test(low) ? 'treibjagd' : /drück|drueck|ansitz/.test(low) ? 'drueckjagd'
+      : /hauptversammlung|jahreshauptversammlung|\bhv\b|\bjhv\b/.test(low) ? 'hv' : /arbeit|einsatz|hochsitz/.test(low) ? 'arbeit'
+      : /schieß|schiess|schießstand/.test(low) ? 'schiessen' : /jagd|niederwild/.test(low) ? 'jagdtag' : 'sonst';
+    // „Jagdleitung: Name“ / „Organisation: …“ aus der Beschreibung übernehmen
+    const lm = desc.match(/^(?:jagdleitung|jagdleiter|leitung|organisation|organisator)\s*:\s*(.+)$/im);
+    if (lm) {
+      const name = lm[1].trim(), nl = name.toLowerCase();
+      const s = state.data.schuetzen.find(x => [x.vollname, x.name].filter(Boolean).some(n => n.toLowerCase() === nl) || (x.vollname && x.vollname.toLowerCase().includes(nl)));
+      if (s) t.leitungId = s.id; else t.leitung = name;
+      desc = desc.replace(lm[0], '').trim();
+    }
+    if (desc) t.besonderheit = desc;
+    if (t.titel.toLowerCase() === (TERMIN_ARTEN[t.art] || '').toLowerCase()) t.titel = '';
+    return t;
+  }).filter(Boolean);
+}
+function pickIcs() {
+  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.ics,text/calendar';
+  inp.addEventListener('change', async () => {
+    const f = inp.files[0]; if (!f) return;
+    let list;
+    try { list = parseIcs(await f.text()); } catch { list = []; }
+    if (!list.length) { toast('In der Datei wurden keine Termine gefunden.', 4000); return; }
+    openIcsImport(sortTermine(list));
+  });
+  inp.click();
+}
+function openIcsImport(list) {
+  const heute = todayISO();
+  const vorhanden = t => state.data.termine.some(x => (t.uid && x.uid === t.uid) || (x.datum === t.datum && terminTitel(x).toLowerCase() === terminTitel(t).toLowerCase()));
+  list.forEach((t, i) => { t._i = i; t._dup = vorhanden(t); t._past = t.datum < heute; });
+  const zukunft = list.filter(t => !t._past).length;
+  openSheet(`Termine importieren (${list.length})`, `
+    <p class="hint">Gefunden: ${list.length} Termin${list.length === 1 ? '' : 'e'}${zukunft < list.length ? `, davon ${list.length - zukunft} vergangen (nicht angehakt)` : ''}. Vorhandene Termine sind ebenfalls nicht angehakt. Die Art wird aus dem Titel erraten – nach dem Import über „Bearbeiten“ anpassbar.</p>
+    <div class="card"><ul class="nt-list ics-list">${list.map(t => `
+      <li><label class="check-row">
+        <input type="checkbox" data-icsi="${t._i}" ${!t._past && !t._dup ? 'checked' : ''}>
+        <span><b>${esc(dateDE(t.datum))}${t.zeit ? ` · ${esc(t.zeit)} Uhr` : ''} – ${esc(terminTitel(t))}</b>
+        <small>${esc([TERMIN_ARTEN[t.art], t.ort, terminLeitung(t)].filter(Boolean).join(' · '))}${t._dup ? ' · <b>schon vorhanden</b>' : ''}${t._past ? ' · vergangen' : ''}${t.wiederholt ? ' · Serientermin: nur erster Termin' : ''}</small></span>
+      </label></li>`).join('')}</ul></div>`,
+    `<button class="btn secondary" data-close>Abbrechen</button><button class="btn" id="icsOk">Übernehmen</button>`);
+  const upd = () => { const n = $$('[data-icsi]:checked').length; $('#icsOk').textContent = n ? `${n} übernehmen` : 'Übernehmen'; $('#icsOk').disabled = !n; };
+  $$('[data-icsi]').forEach(c => c.addEventListener('change', upd)); upd();
+  $('#icsOk').addEventListener('click', () => {
+    const pick = $$('[data-icsi]:checked').map(c => list[+c.dataset.icsi]);
+    const stamp = Date.now().toString(36);
+    const neu = pick.map((t, i) => {
+      const rec = { id: `t-${stamp}${i}`, uid: t.uid, datum: t.datum, zeit: t.zeit, art: t.art, titel: t.titel, ort: t.ort, leitungId: t.leitungId, leitung: t.leitung, besonderheit: t.besonderheit };
+      Object.keys(rec).forEach(k => { if (!rec[k]) delete rec[k]; });
+      return rec;
+    });
+    state.data.termine = [...state.data.termine, ...neu];
+    closeSheet(); persist(`${neu.length} Termin(e) aus Kalenderdatei importiert`); renderTermine();
+    toast(`${neu.length} Termin${neu.length === 1 ? '' : 'e'} übernommen ✓`);
+  });
+}
+
+/** Termin als .ics – iPhone öffnet direkt „Zum Kalender hinzufügen“, Android/PC laden die Datei */
+function terminToCalendar(t) {
+  const icsEsc = v => String(v || '').replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/([,;])/g, '\\$1');
+  const d = t.datum.replace(/-/g, '');
+  let start, end;
+  if (t.zeit) {
+    const [h, mi] = t.zeit.split(':').map(Number);
+    const e = new Date(2000, 0, 1, h + 4, mi); // Dauer pauschal 4 Stunden
+    start = `DTSTART:${d}T${String(h).padStart(2, '0')}${String(mi).padStart(2, '0')}00`;
+    end = `DTEND:${d}T${String(Math.min(e.getHours() + (e.getDate() > 1 ? 24 : 0), 23)).padStart(2, '0')}${String(e.getMinutes()).padStart(2, '0')}00`;
+  } else {
+    const [y, m, dd] = t.datum.split('-').map(Number); const n = new Date(y, m - 1, dd + 1);
+    start = `DTSTART;VALUE=DATE:${d}`; end = `DTEND;VALUE=DATE:${n.getFullYear()}${String(n.getMonth() + 1).padStart(2, '0')}${String(n.getDate()).padStart(2, '0')}`;
+  }
+  const lei = terminLeitung(t);
+  const desc = [lei ? `${leitungArt(t)}: ${lei}` : '', t.besonderheit].filter(Boolean).join('\n');
+  const ics = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//JG Thuine//Jagd Thuine//DE', 'CALSCALE:GREGORIAN', 'BEGIN:VEVENT',
+    `UID:${t.uid || t.id + '@jg-thuine'}`, `DTSTAMP:${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '')}`, start, end,
+    `SUMMARY:${icsEsc('JG Thuine: ' + terminTitel(t))}`, t.ort ? `LOCATION:${icsEsc(t.ort)}` : '', desc ? `DESCRIPTION:${icsEsc(desc)}` : '',
+    ...(erinnerungAn() && t.zeit ? ['BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${icsEsc(terminTitel(t) + ' in 60 Minuten')}`, 'TRIGGER:-PT60M', 'END:VALARM'] : []),
+    'END:VEVENT', 'END:VCALENDAR'].filter(Boolean).join('\r\n');
+  const blob = new Blob([ics], { type: 'text/calendar' });
+  const url = URL.createObjectURL(blob);
+  if (/iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) { location.href = url; }
+  else { const a = document.createElement('a'); a.href = url; a.download = `Termin ${t.datum}.ics`; document.body.appendChild(a); a.click(); a.remove(); }
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+/* ================= Seite Streckenberichte (alle PDF-Downloads) ================= */
+function renderBerichte() {
+  const el = $('#view-berichte');
+  if (!el || !state.data) return;
+  const aktuell = seasonOf(todayISO());
+  const reports = [
+    ['gesamt', 'Gesamtstreckenbericht', 'Niederwild und Schalenwild – nur die Gesamtstrecke'],
+    ['strecke', 'Streckenbericht Niederwild', 'Gesamtstrecke und alle Jagdtage'],
+    ['schalen', 'Streckenbericht Schalenwild', 'Reh-, Dam- und Schwarzwild mit Fallwild'],
+    ['koenig', 'Jagdkönig', 'Rangliste mit Wild je Schütze'],
+  ];
+  el.innerHTML = `
+    <h2 class="section" style="margin-top:4px">Streckenberichte</h2>
+    <p class="sub" style="margin-top:-4px">Antippen, um den Bericht als PDF zu speichern oder zu teilen.</p>
+    ${allSeasons().map(season => {
+      const list = reports.filter(([k]) => k !== 'koenig' || season !== aktuell || isAdmin());
+      return `<div class="card rep-card">
+        <div class="rep-season">Jagdjahr ${esc(season)}${season === aktuell ? ' <small>laufend</small>' : ''}</div>
+        ${list.map(([k, t, d]) => `<button class="rep-row" data-rep="${k}" data-season="${esc(season)}">
+          <span class="rep-ico" aria-hidden="true">⤓</span>
+          <span class="rep-txt"><b>${esc(t)}${k === 'koenig' && season === aktuell ? ' <small>(nur für dich)</small>' : ''}</b><small>${esc(d)}</small></span>
+        </button>`).join('')}
+        ${docsOf(season).map(d => `<div class="rep-doc">
+          <button class="rep-row" data-doc="${esc(d.id)}">
+            <span class="rep-ico doc" aria-hidden="true">📄</span>
+            <span class="rep-txt"><b>${esc(d.titel)}</b><small>Dokument · ${(d.bytes / 1024 / 1024).toFixed(1).replace('.', ',')} MB</small></span>
+          </button>
+          ${isAdmin() ? `<button class="rep-del" data-docdel="${esc(d.id)}" aria-label="Dokument löschen" title="Löschen">✕</button>` : ''}
+        </div>`).join('')}
+        ${isAdmin() ? `<button class="rep-row rep-add" data-docadd="${esc(season)}"><span class="rep-ico" aria-hidden="true">+</span><span class="rep-txt"><b>Dokument hinzufügen</b><small>z. B. Protokoll der Hauptversammlung (PDF)</small></span></button>` : ''}
+      </div>`;
+    }).join('')}`;
+  const fns = { gesamt: exportGesamt, strecke: exportStrecke, schalen: exportSchalen, koenig: exportKoenig };
+  $$('[data-rep]', el).forEach(b => b.addEventListener('click', () => fns[b.dataset.rep](b.dataset.season)));
+  $$('[data-doc]', el).forEach(b => b.addEventListener('click', () => { const d = state.data.dokumente.find(x => x.id === b.dataset.doc); if (d) downloadDoc(d); }));
+  $$('[data-docadd]', el).forEach(b => b.addEventListener('click', () => openDocUpload(b.dataset.docadd)));
+  $$('[data-docdel]', el).forEach(b => b.addEventListener('click', () => {
+    if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Löschen?'; b.classList.add('armed'); setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = '✕'; b.classList.remove('armed'); } }, 4000); return; }
+    deleteDoc(b.dataset.docdel);
+  }));
+}
+
+/* ---------- Installationshilfe (Android ohne Chrome als Standard, iPhone, In-App-Browser) ---------- */
+var installPrompt = null;
+var LS_INST_HIDE = 'sb.installHide';
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installPrompt = e; refreshInstallUi(); });
+window.addEventListener('appinstalled', () => {
+  installPrompt = null; refreshInstallUi();
+  if (!$('#sheet').hidden && $('#instHelp') && !hersteller) closeSheet();
+  toast('App installiert – ab jetzt über das Symbol „Jagd Thuine“ öffnen.', 6000);
+});
+function isStandalone() { return matchMedia('(display-mode: standalone)').matches || matchMedia('(display-mode: fullscreen)').matches || navigator.standalone === true; }
+function browserInfo() {
+  const ua = navigator.userAgent;
+  const ios = /iPhone|iPad|iPod/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const android = /Android/i.test(ua);
+  const inApp = /FBAN|FBAV|FB_IAB|Instagram|Line\/|WhatsApp|Snapchat|; wv\)/i.test(ua);
+  let name = 'other';
+  if (/SamsungBrowser/i.test(ua)) name = 'samsung';
+  else if (/EdgA|EdgiOS/i.test(ua)) name = 'edge';
+  else if (/Firefox|FxiOS/i.test(ua)) name = 'firefox';
+  else if (/OPR\/|OPT\/|Opera/i.test(ua)) name = 'opera';
+  else if (/MiuiBrowser|XiaoMi/i.test(ua)) name = 'miui';
+  else if (/HuaweiBrowser|HONOR/i.test(ua)) name = 'huawei';
+  else if (/CriOS/i.test(ua)) name = 'chrome-ios';
+  else if (android && /Chrome\//.test(ua)) name = 'chrome';
+  else if (ios && /Safari/i.test(ua)) name = 'safari';
+  return { ios, android, inApp, name };
+}
+function installAngebot(start = false) {
+  if (isStandalone()) return false;
+  if (start && lsGet(LS_INST_HIDE, false)) return false;
+  return !!installPrompt || /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+function refreshInstallUi() {
+  ensureLockInstallBtn();
+  const b = $('#lockInstall');
+  if (b) b.hidden = !installAngebot();
+  if (state.tab === 'start') renderStart();
+}
+function appLink() { return location.origin + location.pathname.replace(/index\.html$/, ''); }
+function chromeIntent() { return `intent://${location.host}${location.pathname.replace(/index\.html$/, '')}?installieren#Intent;scheme=https;package=com.android.chrome;end`; }
+/* Hersteller mit eigener Sperre für Startbildschirm-Symbole (Xiaomi, Huawei/Honor, Oppo/Realme, Vivo) */
+var hersteller = '';
+const HERSTELLER = {
+  xiaomi: { name: 'Xiaomi / Redmi / POCO', weg: 'Einstellungen → <b>Apps</b> → <b>Apps verwalten</b> → <b>Chrome</b> → <b>Weitere Berechtigungen</b> (evtl. unter „App-Berechtigungen“) → <b>„Verknüpfungen auf dem Startbildschirm“</b> → <b>Zulassen</b>' },
+  huawei: { name: 'Huawei / Honor', weg: 'Einstellungen → <b>Apps</b> → <b>Apps</b> → <b>Chrome</b> → <b>Berechtigungen</b> → <b>„Verknüpfungen auf dem Startbildschirm erstellen“</b> → <b>Zulassen</b>' },
+  oppo: { name: 'Oppo / Realme / OnePlus', weg: 'Einstellungen → <b>Apps</b> → <b>App-Verwaltung</b> → <b>Chrome</b> → <b>Berechtigungen</b> → <b>„Verknüpfungen erstellen“</b> → <b>Zulassen</b>' },
+  vivo: { name: 'Vivo', weg: 'Einstellungen → <b>Apps</b> → <b>Chrome</b> → <b>Berechtigungen</b> → <b>„Desktop-Verknüpfungen“</b> → <b>Zulassen</b>' },
+};
+function herstellerAus(t) {
+  t = String(t || '');
+  if (/xiaomi|redmi|poco|\bmi \d|miui|^m?2\d{3}[a-z0-9]{3,}$|^\d{5}[a-z0-9]{3,}$/i.test(t)) return 'xiaomi';
+  if (/huawei|honor|^[a-z]{3}-[a-z]{1,2}\d{1,2}[a-z]?$/i.test(t)) return 'huawei';
+  if (/oppo|realme|oneplus|^cph\d{4}|^rmx\d{4}|^pe[a-z]\d{3}/i.test(t)) return 'oppo';
+  if (/vivo|^v\d{4}[a-z]?$/i.test(t)) return 'vivo';
+  return '';
+}
+(async function erkenneHersteller() {
+  if (!/Android/i.test(navigator.userAgent)) return;
+  hersteller = herstellerAus(navigator.userAgent) || (navigator.userAgent.match(/Android [\d.]+; ([^;)]+)/) ? herstellerAus(navigator.userAgent.match(/Android [\d.]+; ([^;)]+)/)[1].replace(/ Build.*/, '').trim()) : '');
+  if (hersteller) return;
+  try { const h = await navigator.userAgentData?.getHighEntropyValues?.(['model']); hersteller = herstellerAus(h && h.model); } catch { /* egal */ }
+})();
+function herstellerHinweis(offen) {
+  const list = hersteller ? [hersteller] : Object.keys(HERSTELLER);
+  return `<details class="inst-alt inst-hst"${offen ? ' open' : ''}><summary>${hersteller ? `Wichtig bei ${HERSTELLER[hersteller].name}` : 'Kein Symbol erschienen?'}</summary>
+    <p>${hersteller ? 'Bei diesen Handys darf Chrome anfangs oft <b>keine Symbole</b> auf den Startbildschirm legen. Einmal erlauben:' : 'Manche Hersteller sperren das anfangs. Einmal erlauben:'}</p>
+    ${list.map(k => `<p>${hersteller ? '' : `<b>${HERSTELLER[k].name}:</b><br>`}${HERSTELLER[k].weg}</p>`).join('')}
+    <p class="hint">Die Bezeichnungen weichen je nach Modell etwas ab. Benutzt du einen anderen Browser, gilt dasselbe für diesen statt für Chrome. Danach die Installation noch einmal starten.</p></details>`;
+}
+function openHerstellerCheck() {
+  openSheet('Symbol da?', `<div id="instHelp" class="inst-help"><p>Liegt das Symbol <b>„Jagd Thuine“</b> <img src="icons/icon-180.png" alt="" class="inst-ico"> jetzt auf dem Startbildschirm (evtl. auf der letzten Seite)?</p>${herstellerHinweis(true)}</div>`, '<button class="btn" data-close>Ja, alles da</button>');
+}
+
+async function startInstall(vonStart = false) {
+  if (installPrompt) {
+    const p = installPrompt; installPrompt = null;
+    try { p.prompt(); const r = await p.userChoice; if (r && r.outcome === 'accepted') { toast('Wird installiert …'); if (hersteller) setTimeout(openHerstellerCheck, 2500); } } catch { openInstallHilfe(vonStart); }
+    refreshInstallUi();
+    return;
+  }
+  openInstallHilfe(vonStart);
+}
+function openInstallHilfe(vonStart = false) {
+  const b = browserInfo();
+  const step = t => `<li>${t}</li>`;
+  const chromeBtn = `<a class="btn block inst-chrome" href="${esc(chromeIntent())}">In Chrome öffnen</a>
+    <p class="hint">Chrome ist auf fast jedem Android-Handy vorhanden, auch wenn ein anderer Browser Standard ist. Dort dann auf <b>„App installieren“</b> tippen. Fehlt Chrome, öffnet sich der Play Store.</p>`;
+  const ohneChrome = {
+    samsung: 'Unten auf das Menü <span class="key">☰</span> tippen → <b>„Seite hinzufügen zu“</b> → <b>„Startbildschirm“</b>. Oder oben in der Adresszeile das Installieren-Symbol <span class="key">⤓</span> antippen.',
+    firefox: 'Oben/unten auf <span class="key">⋮</span> tippen → <b>„Installieren“</b> bzw. <b>„Zum Startbildschirm hinzufügen“</b>.',
+    edge: 'Unten auf <span class="key">…</span> tippen → <b>„Zum Telefon hinzufügen“</b> bzw. <b>„App installieren“</b>.',
+    opera: 'Auf <span class="key">⋮</span> tippen → <b>„Zum Startbildschirm“</b>.',
+  }[b.name] || 'Im Menü des Browsers nach <b>„Zum Startbildschirm hinzufügen“</b> oder <b>„Installieren“</b> suchen.';
+  let html = '';
+  if (b.inApp && b.android) {
+    html = `<p><b>Du bist im eingebauten Browser einer anderen App</b> (z. B. WhatsApp). Von dort lässt sich nicht installieren.</p>${chromeBtn}
+      <p class="hint">Alternativ oben rechts <span class="key">⋮</span> → <b>„Im Browser öffnen“</b>.</p>`;
+  } else if (b.inApp && b.ios) {
+    html = `<p><b>Du bist im eingebauten Browser einer anderen App</b> (z. B. WhatsApp). Von dort lässt sich nicht installieren.</p>
+      <ol class="inst-steps">${step('Unten rechts auf das Kompass-Symbol bzw. <b>„In Safari öffnen“</b> tippen.')}${step('Dann in Safari wieder auf <b>„App installieren“</b> tippen.')}</ol>`;
+  } else if (b.android && b.name === 'chrome') {
+    html = `<ol class="inst-steps">${step('Oben rechts auf die drei Punkte <span class="key">⋮</span> tippen.')}${step('<b>„App installieren“</b> oder <b>„Zum Startbildschirm hinzufügen“</b> antippen.')}${step('Mit <b>„Installieren“</b> bestätigen.')}</ol>
+      <p class="hint">Steht im Menü <b>„App öffnen“</b>, ist die App schon installiert – dann das Symbol „Jagd Thuine“ auf dem Startbildschirm benutzen.</p>`;
+  } else if (b.android) {
+    html = `<p><b>Am einfachsten:</b></p>${chromeBtn}
+      <details class="inst-alt"><summary>Ohne Chrome installieren</summary><p>${ohneChrome}</p></details>`;
+  } else if (b.ios) {
+    const wo = b.name === 'safari' ? 'Unten in der Mitte' : (b.name === 'chrome-ios' ? 'Oben rechts in der Adresszeile' : 'Im Browser');
+    html = `<ol class="inst-steps">
+        ${step(`${wo} auf das <b>Teilen-Symbol</b> <span class="key">⬆︎</span> tippen (bei neueren iPhones evtl. erst <span class="key">…</span>).`)}
+        ${step('Nach unten wischen und <b>„Zum Home-Bildschirm“</b> antippen.')}
+        ${step('Oben rechts <b>„Hinzufügen“</b> tippen.')}</ol>
+      ${b.name === 'safari' ? '' : '<p class="hint">Klappt das nicht, den Link in <b>Safari</b> öffnen (Link kopieren, in Safari einfügen).</p>'}
+      <p class="hint">Wichtig beim iPhone: Das Passwort erst in der installierten App eingeben – Safari und App merken es sich getrennt.</p>`;
+  } else {
+    html = `<p>Am PC in Chrome oder Edge rechts in der Adresszeile auf das Installieren-Symbol <span class="key">⤓</span> klicken. Auf dem Handy den Link öffnen und dort auf „App installieren“ tippen.</p>`;
+  }
+  if (b.android && !b.inApp) html = (hersteller ? herstellerHinweis(true) : '') + html + (hersteller ? '' : herstellerHinweis(false));
+  html = `<div id="instHelp" class="inst-help">${html}
+    <p class="hint">Danach die App immer über das Symbol <b>„Jagd Thuine“</b> <img src="icons/icon-180.png" alt="" class="inst-ico"> öffnen.</p>
+    <button type="button" class="btn ghost block" id="instCopy">🔗 Link kopieren</button></div>`;
+  openSheet('App installieren', html, `${vonStart ? '<button class="btn ghost" id="instHide">Nicht mehr anzeigen</button>' : ''}<button class="btn" data-close>Schließen</button>`);
+  if (!$('#lock').hidden) $('#sheet').classList.add('over-lock');
+  $('#instCopy').addEventListener('click', () => kopiereLink(appLink()));
+  $('#instHide')?.addEventListener('click', () => { lsSet(LS_INST_HIDE, true); closeSheet(); renderStart(); toast('Ausgeblendet – unter Einstellungen → „Über die App“ wieder zu finden.', 4500); });
+}
+async function kopiereLink(url) {
+  try { await navigator.clipboard.writeText(url); toast('Link kopiert'); }
+  catch { prompt('Link kopieren:', url); }
+}
+function checkInstallParam() {
+  const q = new URLSearchParams(location.search);
+  if (!q.has('installieren')) return;
+  q.delete('installieren');
+  history.replaceState(history.state, '', location.pathname + (q.toString() ? '?' + q : '') + location.hash);
+  if (isStandalone()) return;
+  setTimeout(() => { if (!installPrompt || !$('#sheet').hidden) openInstallHilfeOrPrompt(); }, 900);
+}
+function openInstallHilfeOrPrompt() {
+  if (installPrompt) {
+    // prompt() braucht einen Tipp – deshalb ein großer Knopf
+    openSheet('App installieren', `<div id="instHelp" class="inst-help"><p>Mit einem Tipp liegt <b>Jagd Thuine</b> auf dem Startbildschirm.</p><button type="button" class="btn block" id="instNow">📲 Jetzt installieren</button></div>`, '<button class="btn secondary" data-close>Später</button>');
+    if (!$('#lock').hidden) $('#sheet').classList.add('over-lock');
+    $('#instNow').addEventListener('click', () => { closeSheet(); startInstall(); });
+  } else openInstallHilfe();
+}
+
+function renderStart() {
+  const el = $('#view-start');
+  if (!el || !state.data) return;
+  const st = seasonStats(state.season);
+  const sw = schalenStats(state.season);
+  const reh = sw.tot('reh'), damm = sw.tot('damm');
+  const kommend = kommendeTermine(), next = kommend[0];
+  el.innerHTML = `
+    <div class="start-hero2">
+      <img src="icons/logo.png" alt="Jagdgemeinschaft Thuine">
+      <label class="hs-season">
+        <span class="hs-lbl">Jagdjahr</span>
+        <span class="hs-sel"><select id="heroSeason" aria-label="Jagdjahr wählen">${allSeasons().map(x => `<option value="${x}" ${x === state.season ? 'selected' : ''}>${x}</option>`).join('')}</select><span class="hs-caret" aria-hidden="true">▾</span></span>
+        ${state.season === seasonOf(todayISO()) ? '<span class="hs-now">aktuelles Jagdjahr</span>' : `<button type="button" class="hs-back" id="heroNow">zurück zu ${seasonOf(todayISO())}</button>`}
+      </label>
+    </div>
+    ${sperreBanner()}
+    ${erinnerungBanner()}
+    ${installAngebot(true) ? `<button class="start-tile inst-tile" id="btnInstall"><span class="st-title">📲 App installieren</span><span class="st-meta">${installPrompt ? 'Ein Tipp – dann liegt Jagd Thuine auf dem Startbildschirm' : 'So kommt Jagd Thuine auf den Startbildschirm'}</span><span class="st-go" aria-hidden="true">›</span></button>` : ''}
+    ${isAdmin() && state.meldungen.length ? `<button class="start-tile ml-tile" id="btnMeldungen"><span class="st-title">📬 ${state.meldungen.length} neue Meldung${state.meldungen.length === 1 ? '' : 'en'}</span><span class="st-meta">antippen zum Prüfen und Übernehmen</span><span class="st-go" aria-hidden="true">›</span></button>` : ''}
+    ${canMelden() ? `<button class="start-tile melden-tile" id="btnMelden">
+      <span class="st-title"><span class="mt-plus" aria-hidden="true">+</span> Wild melden</span>
+      <span class="st-meta">Erlegtes Stück oder Fallwild melden</span>
+      <span class="st-go" aria-hidden="true">›</span>
+    </button>` : ''}
+    <button class="start-tile" data-go="termine">
+      <span class="st-title">Termine</span>
+      ${kommend.length ? kommend.slice(0, 2).map(t => `<span class="st-tm">
+        <b>${esc(dateDE(t.datum, true).replace(/\d{4}$/, '').trim())}${t.zeit ? ` · ${esc(t.zeit)} Uhr` : ''} – ${esc(terminTitel(t))}</b>
+        ${t.ort || terminLeitung(t) ? `<small>${t.ort ? `📍 ${esc(t.ort)}` : ''}${t.ort && terminLeitung(t) ? ' · ' : ''}${terminLeitung(t) ? `👤 ${esc(terminLeitung(t))}` : ''}</small>` : ''}
+      </span>`).join('') + (kommend.length > 2 ? `<span class="st-meta">+ ${kommend.length - 2} weitere</span>` : '') : '<span class="st-meta">Zurzeit keine Termine eingetragen</span>'}
+      <span class="st-go" aria-hidden="true">›</span>
+    </button>
+    <div class="st-grid">
+      <button class="start-tile st-half st-sym" data-go="strecke">
+        <span class="st-icon st-wide"><svg viewBox="0 0 120 64" fill="currentColor" aria-hidden="true"><path d="M46 43c4-4 9-7 15-9l11-4c4-1 7-3 9-5l3-4c1-2 3-3 6-3 2 0 4 1 5 2l4 1-3 2c-1 1-2 2-4 2l-2 1c-1 2-2 4-4 5 1 3 0 6-1 8-2 5-7 8-12 9-7 2-15 2-22 1z"/><path d="M52 41 34 46 14 52 2 57l14-2 20-6 18-5z"/><path d="M50 44 30 50 4 61l18-5 22-7z"/><path d="M62 33c-3-4-6-9-7-14l-3-11 4 4-1-9 4 6 1-9 3 7 2-8 2 8 3-7 1 8 3-5-1 8 4-4-1 8 4-2-3 7 4 0-4 5c-3 4-7 6-12 6z"/><path d="M68 46c3 2 6 5 8 8l3 4 1-3 2 4 1-3 3 4 1-3 3 3-1-3 4 1-3-3c-3-3-7-6-11-8-4-2-8-2-12-1z"/></svg></span>
+        <span class="st-title">Niederwild</span>
+      </button>
+      <button class="start-tile st-half st-sym" data-go="schalen">
+        <span class="st-icon"><svg viewBox="0 0 64 64" fill="currentColor" aria-hidden="true"> <path d="M24 26c0-2 3.5-4 8-4s8 2 8 4l-2 18c-.5 4-3 8-6 8s-5.5-4-6-8z"/> <ellipse cx="20" cy="28" rx="6" ry="2.6" transform="rotate(20 20 28)"/> <ellipse cx="44" cy="28" rx="6" ry="2.6" transform="rotate(-20 44 28)"/> <g fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"> <path d="M27 23C22 17 18 13 17 4M20.5 15.5 12 12M18 9.5 12 4.5M23 19.5 15 20"/> <path d="M37 23c5-6 9-10 10-19M43.5 15.5 52 12M46 9.5l6-5M41 19.5 49 20"/> </g> </svg></span>
+        <span class="st-title">Schalenwild</span>
+      </button>
+    </div>
+    <button class="start-tile" data-go="berichte">
+      <span class="st-title">Streckenberichte</span>
+      <span class="st-meta">PDF-Berichte aller Jagdjahre</span>
+      <span class="st-go" aria-hidden="true">›</span>
+    </button>`;
+  $('#btnMelden')?.addEventListener('click', openMelden);
+  $('#btnInstall')?.addEventListener('click', () => startInstall(true));
+  $('#btnMeldungen')?.addEventListener('click', openMeldungen);
+  const setSeason = v => { const sel = $('#seasonSelect'); sel.value = v; sel.dispatchEvent(new Event('change')); };
+  $('#heroSeason')?.addEventListener('change', e => setSeason(e.target.value));
+  $('#heroNow')?.addEventListener('click', e => { e.preventDefault(); setSeason(seasonOf(todayISO())); });
+  $$('[data-go]', el).forEach(b => b.addEventListener('click', () => switchTab(b.dataset.go)));
+}
+$$('.tab').forEach(t => t.addEventListener('click', () => switchTab(t.dataset.tab)));
+$('#seasonSelect').addEventListener('change', e => { state.season = e.target.value; renderTage(); renderStrecke(); renderKoenig(); renderSchalen(); renderStart(); });
+$('#settingsBtn').addEventListener('click', openSettings);
+ensureLockDom();
+ensureLockInstallBtn();
+refreshInstallUi();
+checkInstallParam();
+$('#lockForm')?.addEventListener('submit', unlock);
+$('#forgotPw')?.addEventListener('click', openReset);
+/* ---------- Aktualisieren: beim Zurückkehren, alle 5 Minuten im Vordergrund und per Knopf ---------- */
+let lastRefresh = Date.now();
+function refreshAll() {
+  lastRefresh = Date.now();
+  return Promise.allSettled([state.pending ? null : load(), loadSchalen(), loadMeldungen()]);
+}
+const ruhig = () => document.visibilityState === 'visible' && $('#sheet').hidden && !$('#pdfv') && !$('#lock:not([hidden])');
+document.addEventListener('visibilitychange', () => { if (ruhig()) refreshAll(); });
+setInterval(() => { if (ruhig() && Date.now() - lastRefresh >= 5 * 60e3 - 5e3) refreshAll(); }, 30e3);
+function ensureRefreshBtn() {
+  if ($('#refreshBtn') || !$('#settingsBtn')) return;
+  $('#settingsBtn').insertAdjacentHTML('beforebegin', `<button class="icon-btn" id="refreshBtn" aria-label="Aktualisieren" title="Aktualisieren">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg></button>`);
+}
+ensureRefreshBtn();
+$('#refreshBtn')?.addEventListener('click', async e => {
+  const b = e.currentTarget; if (b.classList.contains('spin')) return;
+  b.classList.add('spin');
+  await refreshAll();
+  setTimeout(() => b.classList.remove('spin'), 400);
+  toast(navigator.onLine === false ? 'Offline – zeige zuletzt geladenen Stand.' : 'Aktualisiert ✓');
+});
+
+/* ================= Service Worker (Update-Hinweis) ================= */
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  let reloaded = false;
+  const reloadOnce = () => { if (!reloaded) { reloaded = true; location.reload(); } };
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => {
+    const offer = w => {
+      showBanner(`<span>Neue Version verfügbar.</span><button class="btn" id="swReload">Neu laden</button>`, 'info');
+      $('#swReload').addEventListener('click', () => {
+        showBanner('<span>Neue Version wird geladen …</span>', 'info');
+        // iPhone-Web-Apps melden den Wechsel nicht immer zuverlässig → mehrere Wege zum Neuladen
+        w.addEventListener('statechange', () => { if (w.state === 'activated') reloadOnce(); });
+        w.postMessage('skipWaiting');
+        setTimeout(reloadOnce, 1500);
+      });
+    };
+    if (reg.waiting && navigator.serviceWorker.controller) offer(reg.waiting);
+    reg.addEventListener('updatefound', () => {
+      const w = reg.installing;
+      w?.addEventListener('statechange', () => { if (w.state === 'installed' && navigator.serviceWorker.controller) offer(w); });
+    });
+    setInterval(() => reg.update().catch(() => {}), 30 * 60 * 1000);
+  }).catch(() => {});
+  navigator.serviceWorker.addEventListener('controllerchange', reloadOnce);
+}
+
+try { history.replaceState({ sb: 0 }, ''); } catch { /* egal */ }
+/* ---------- Konto (Konten-Server) ---------- */
+window.Konto?.init({
+  ui: {
+    openSheet: (t, b, f, over) => { openSheet(t, b, f); $('#sheet').classList.toggle('over-lock', !!over); },
+    closeSheet: () => closeSheet(),
+    toast,
+  },
+  getPw: () => state.pw,
+  setPw: async pw => { state.pw = pw; state.pwOld = ''; lsSet(LS_PW, pw); await load(true); if ($('#lock').hidden) loadSchalen(); },
+  onChange: () => { refreshLockKonto(); if (state.data && $('#lock').hidden) { render(); loadSchalen(); loadMeldungen(); } },
+  badge: () => { if (isAdmin()) updateBadge(); else { try { navigator.clearAppBadge?.().catch(() => {}); } catch { /* egal */ } } },
+});
+refreshLockKonto();
+load().then(() => { loadSchalen(); loadMeldungen(); });
+switchTab('start');

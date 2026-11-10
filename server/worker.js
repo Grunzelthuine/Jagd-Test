@@ -43,7 +43,7 @@ const CONFIG = {
     },
   },
   // Foto-Auswertung (Claude). Schlüssel als Secret ANTHROPIC_KEY. Nur Admins dieser App.
-  ki: { app: 'thuine', modell: 'claude-sonnet-4-6', maxTokens: 3000, proTagUndPerson: 20, proTagGesamt: 60 },
+  ki: { app: 'thuine', modell: 'claude-opus-5-5', maxTokens: 3000, proTagUndPerson: 20, proTagGesamt: 60 },
 };
 /* ========================================================= */
 

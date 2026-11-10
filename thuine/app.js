@@ -26,7 +26,7 @@ async function repairApp() {
 window.addEventListener('error', e => showRescue(e.message));
 window.addEventListener('unhandledrejection', e => { if (!(e.reason && e.reason.name === 'AbortError')) showRescue(e.reason?.message || e.reason); });
 
-const APP_VERSION = '2.24.2';
+const APP_VERSION = '2.24.3';
 /* Einstellungen je Installation (config.js): Konten-Server, Test-Umgebung, abweichende Speicherorte */
 const CONF = self.JAGD_CFG || {};
 const LSP = CONF.lsPrefix || '';
@@ -38,7 +38,7 @@ const LS_SCHALEN_OPS = 'sb.schalen.ops.v1';
 const SCHALEN_PATH = CONF.schalenPath || 'schalenwild.json';
 /* Alte Damwild-Kategorien (bis 2.15) → neue 8 Kategorien */
 const KAT_ALIAS = { 'hirsch-3a': 'hirsch-3b', hirschkalb: 'kalb' };
-const FALLBACK_MODEL = 'claude-sonnet-4-6';
+const FALLBACK_MODEL = 'claude-opus-5-5';
 
 /* ================= Hilfsfunktionen ================= */
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -2197,7 +2197,7 @@ function openSettings() {
       const j = await r.json();
       if (!r.ok) throw new Error(j?.error?.message || r.status);
       const models = (j.data || []).map(m => m.id);
-      const pick = state.cfg.model || models.find(m => m.includes('sonnet')) || models[0] || FALLBACK_MODEL;
+      const pick = state.cfg.model || models.find(m => m.includes('opus')) || models[0] || FALLBACK_MODEL;
       $('#cfModel').innerHTML = models.map(m => `<option value="${esc(m)}" ${m === pick ? 'selected' : ''}>${esc(m)}</option>`).join('');
       toast('Schlüssel gültig ✓ – Modelle geladen.');
     } catch (e) { toast('Schlüssel/Modelle: ' + e.message, 4500); }

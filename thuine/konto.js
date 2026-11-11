@@ -373,7 +373,8 @@ window.Konto = (() => {
   }
   /** Admin: Nachricht an alle angemeldeten Geräte dieser App */
   async function pushSend(msg) {
-    if (!isAdmin() || !CFG.push) return null;
+    const rechte = st.user?.apps?.[APP]?.rechte || [];
+    if (!CFG.push || !(isAdmin() || (hatZugang() && rechte.length))) return null;
     try { return await api('POST', '/push/senden', { app: APP, url: location.origin + location.pathname, ...msg }); } catch { return null; }
   }
   /** Abo beim Start auffrischen (falls der Browser es erneuert hat) */

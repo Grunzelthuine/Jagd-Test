@@ -80,7 +80,8 @@ h2.section { font: 600 17px/1.2 var(--serif); color: var(--green); margin: 18px 
 .map-btn.on { background: var(--green); color: #f4f1de; border-color: var(--green); }
 .map-btn.follow { background: #1c5fbf; color: #fff; border-color: #1c5fbf; }
 .fab { position: absolute; z-index: 500; left: 50%; transform: translateX(-50%); bottom: 16px; display: inline-flex; align-items: center; gap: 8px; min-height: 50px; padding: 10px 20px 10px 14px; border-radius: 25px; border: 0; background: var(--green); color: #f4f1de; font-weight: 700; font-size: 15.5px; box-shadow: 0 4px 16px rgba(0,0,0,.3); white-space: nowrap; }
-.fab-plus { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 15px; background: #f4f1de; color: var(--green); font-size: 22px; line-height: 1; }
+.fab-plus { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 15px; background: #f4f1de; color: var(--green); flex: none; }
+.fab-plus svg { display: block; }
 .layer-name { position: absolute; z-index: 500; top: 12px; left: 50%; transform: translateX(-50%); padding: 6px 14px; border-radius: 999px; background: rgba(34, 48, 29, .85); color: #f4f1de; font-size: 13px; font-weight: 600; pointer-events: none; }
 .leaflet-container { font-family: var(--sans); }
 .leaflet-control-attribution { font-size: 10px; background: rgba(242,240,223,.8) !important; }

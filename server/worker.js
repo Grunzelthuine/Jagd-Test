@@ -23,10 +23,15 @@ const CONFIG = {
   apps: {
     thuine: {
       name: 'Jagd Thuine',
-      rechte: {},
+      rechte: {
+        termine: 'Termine eintragen und ändern',
+        freigabe: 'Damwild-Freigabe ändern',
+        sperre: 'Hirschjagd-Sperre setzen und aufheben',
+      },
       // Erste passende Regel zählt. write: 'admin' | 'mitglied' | [Einzelrechte]
       regeln: [
         { repo: 'Jagd-Test', pfad: 'thuine/data/meldungen.json', write: 'mitglied' },
+        { repo: 'Jagd-Test', pfad: 'thuine/data/strecke.json', write: ['termine', 'freigabe', 'sperre'] },
         { repo: 'Jagd-Test', pfad: 'thuine/', write: 'admin' },
       ],
     },
@@ -518,7 +523,9 @@ async function pushSendenRoute(req, env, ctx) {
   const u = await auth(req, env);
   const b = await body(req);
   if (!CONFIG.apps[b.app]) fail(400, 'Unbekannte App.');
-  if (!isAppAdmin(u, b.app)) fail(403, 'Nur Admins können Benachrichtigungen senden.');
+  // Admins und Konten mit Einzelrechten (z. B. Termin eintragen → Nachricht „Neuer Termin“)
+  const darf = isAppAdmin(u, b.app) || Object.keys(CONFIG.apps[b.app].rechte || {}).some(r => hatRecht(u, b.app, r));
+  if (!darf) fail(403, 'Keine Berechtigung, Benachrichtigungen zu senden.');
   const msg = { title: String(b.title || CONFIG.apps[b.app].name).slice(0, 80), body: String(b.body || '').slice(0, 300), tag: String(b.tag || '').slice(0, 40), url: String(b.url || '').slice(0, 300) };
   const res = await sendeAnAlle(env, b.app, msg);
   ctx.waitUntil(log(env, u, `Benachrichtigung: ${msg.title} – ${msg.body}`.slice(0, 200), { app: b.app }));

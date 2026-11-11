@@ -26,7 +26,7 @@ async function repairApp() {
 window.addEventListener('error', e => showRescue(e.message));
 window.addEventListener('unhandledrejection', e => { if (!(e.reason && e.reason.name === 'AbortError')) showRescue(e.reason?.message || e.reason); });
 
-const APP_VERSION = '2.24.4';
+const APP_VERSION = '2.24.5';
 /* Einstellungen je Installation (config.js): Konten-Server, Test-Umgebung, abweichende Speicherorte */
 const CONF = self.JAGD_CFG || {};
 const LSP = CONF.lsPrefix || '';
@@ -237,6 +237,12 @@ if ((state.cfg.mode !== 'voll' && location.hostname.endsWith('.github.io')) || C
 const tokenAdmin = () => !!(state.cfg.mode === 'voll' && state.cfg.token && state.cfg.owner && state.cfg.repo);
 const viaKonto = () => !tokenAdmin() && !!window.Konto?.hatZugang();
 const isAdmin = () => tokenAdmin() || !!(window.Konto?.isAdmin() && state.cfg.owner && state.cfg.repo);
+/** Einzelrechte (vom Admin je Person freigegeben): Termine, Damwild-Freigabe, Hirschjagd-Sperre */
+const canRecht = r => isAdmin() || !!window.Konto?.can(r);
+const canTermine = () => canRecht('termine');
+const canFreigabe = () => canRecht('freigabe');
+const canSperre = () => canRecht('sperre');
+const canSpeichern = () => isAdmin() || canTermine() || canFreigabe() || canSperre();
 const canSchalen = () => !!((((state.cfg.mode === 'voll' || state.cfg.mode === 'schalen') && state.cfg.token) || window.Konto?.isAdmin()) && state.cfg.owner && state.cfg.repo2);
 
 /* ================= Berechnungen ================= */
@@ -457,7 +463,7 @@ async function persist(message) {
 }
 
 async function pushRemote(message = 'Streckenbericht aktualisiert') {
-  if (!isAdmin()) { showPendingBanner(); return false; }
+  if (!canSpeichern()) { showPendingBanner(); return false; }
   if (saving) return false;
   saving = true;
   showBanner('Speichere …', 'info');
@@ -604,7 +610,7 @@ const terminWann = t => `${dateDE(t.datum, true)}${t.zeit ? `, ${t.zeit} Uhr` : 
 function pushNachSpeichern() {
   const alt = state.pushBase, neu = pushStand(state.data);
   state.pushBase = neu;
-  if (!alt || !CONF.push || !window.Konto?.isAdmin()) return;
+  if (!alt || !CONF.push || !window.Konto?.loggedIn() || !canSpeichern()) return;
   const msgs = [];
   const vorher = new Map(alt.termine.map(t => [t.id, JSON.stringify(t)]));
   const neuT = [], geaendertT = [];
@@ -971,7 +977,7 @@ function freigabeCard() {
   }).join('');
   return `${liste.length ? `<div class="fgc-grid">${chips}</div>` : '<p class="hint">Kein Wild für die Freigabe ausgewählt (Einstellungen → Freigabe Damwild).</p>'}
     <p class="hint fg-legend"><span class="fg-k fg-frei"></span>frei <span class="fg-k fg-regel"></span>gesperrt nach unserer Regelung <span class="fg-k fg-gesetz"></span>Schonzeit laut Jagdgesetz${stand ? ` · Stand ${dateDE(stand)}` : ''}</p>
-    ${isAdmin() ? '<button class="btn secondary block" id="fgEdit" style="margin-top:4px">Freigabe ändern</button>' : ''}`;
+    ${canFreigabe() ? '<button class="btn secondary block" id="fgEdit" style="margin-top:4px">Freigabe ändern</button>' : ''}`;
 }
 /** Admin: Freigabe je Kategorie umschalten */
 function openFreigabe() {
@@ -1291,7 +1297,7 @@ function renderSchalen() {
       <div class="card stat"><div class="v">${t.erlegt + t.fallwild}</div><div class="l">gesamt</div></div>
     </div>
     ${canSchalen() ? `<button class="btn block" id="btnSchalen">+ ${W.name} eintragen</button>` : ''}
-    ${art === 'damm' && isAdmin() ? `<button class="btn ${hirschSperre() ? 'danger' : 'secondary'} block" id="btnSperre" style="margin-top:8px">${hirschSperre() ? '⛔ Sperre Hirschjagd ändern / aufheben' : 'Hirschjagd sperren (Fehlabschuss)'}</button>` : ''}
+    ${art === 'damm' && canSperre() ? `<button class="btn ${hirschSperre() ? 'danger' : 'secondary'} block" id="btnSperre" style="margin-top:8px">${hirschSperre() ? '⛔ Sperre Hirschjagd ändern / aufheben' : 'Hirschjagd sperren (Fehlabschuss)'}</button>` : ''}
     ${state.schalenOps.length ? `<div class="alert">${state.schalenOps.length} Änderung(en) noch nicht hochgeladen.</div>` : ''}
     ${art === 'damm' && aktuell ? aktuellesStueck() : ''}
     <div class="kk-stack">${kacheln}</div>`;
@@ -2080,7 +2086,7 @@ function applyAiResult(res, photo) {
 function openSettings() {
   const c = state.cfg;
   const body = `
-    <div class="alert info">${viaKonto() && isAdmin() ? '<b>Admin (über dein Konto).</b> Du kannst alles erfassen und verwalten.' : viaKonto() ? '<b>Angemeldet mit Konto.</b> Du kannst alles ansehen und Wild melden.' : isAdmin() ? '<b>Voller Zugang.</b> Du kannst alles erfassen und verwalten.' : canSchalen() ? '<b>Zugang Schalenwild.</b> Du kannst Reh-, Dam- und Schwarzwild eintragen, alles andere nur ansehen.' : '<b>Ansichtsmodus.</b> Zum Ansehen brauchst du nichts einzutragen.'}</div>
+    <div class="alert info">${viaKonto() && isAdmin() ? '<b>Admin (über dein Konto).</b> Du kannst alles erfassen und verwalten.' : viaKonto() ? `<b>Angemeldet mit Konto.</b> Du kannst alles ansehen und Wild melden${[canTermine() && 'Termine eintragen', canFreigabe() && 'die Damwild-Freigabe ändern', canSperre() && 'die Hirschjagd-Sperre setzen'].filter(Boolean).map(t => ', ' + t).join('')}.` : isAdmin() ? '<b>Voller Zugang.</b> Du kannst alles erfassen und verwalten.' : canSchalen() ? '<b>Zugang Schalenwild.</b> Du kannst Reh-, Dam- und Schwarzwild eintragen, alles andere nur ansehen.' : '<b>Ansichtsmodus.</b> Zum Ansehen brauchst du nichts einzutragen.'}</div>
     ${window.Konto?.settingsHtml() || ''}
     <fieldset><legend>${CONF.api ? 'Auf diesem Gerät' : 'Zugang'}</legend>
       <label class="field"><span>Ich bin</span>
@@ -2875,7 +2881,7 @@ function terminCard(t, admin) {
 function renderTermine() {
   const el = $('#view-termine');
   if (!el || !state.data) return;
-  const admin = isAdmin();
+  const admin = canTermine();
   const kommend = kommendeTermine();
   const vergangen = sortTermine(state.data.termine.filter(terminVorbei)).reverse();
   const vSeasons = [...new Set(vergangen.map(t => seasonOf(t.datum)))].sort().reverse();

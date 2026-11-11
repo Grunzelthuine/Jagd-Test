@@ -2,7 +2,7 @@
    api: Adresse des Konten-Servers (Cloudflare Worker). Leer = ohne Konten (wie bisher). */
 self.JAGD_CFG = {
   app: 'thuine',
-  api: '',
+  api: 'https://jagd-test.sebastian-bruns.workers.dev',
   push: true,
   test: true,
   lsPrefix: 'test.',          // eigener Gerätespeicher – getrennt von der echten App

@@ -12,6 +12,7 @@ Dauer: etwa 20–30 Minuten, am besten am PC. Die Bezeichnungen bei GitHub, Clou
 - [ ] 6. Claude-Schlüssel erstellen und als Secret `ANTHROPIC_KEY` hinterlegen
 - [ ] 7. Adresse prüfen und an Claude schicken
 - [ ] 8. (nach Claudes Rückmeldung) Als Erster ein Konto anlegen = Haupt-Admin
+- [ ] 9. Startseite `jg-thuine` bei Cloudflare Pages anlegen (unabhängig von 1–8, geht jederzeit)
 
 **Tipp:** Token und Schlüssel werden jeweils nur einmal angezeigt. Am besten sofort in Cloudflare einfügen und nirgends sonst speichern (nicht in Chat, Mail oder WhatsApp).
 
@@ -82,3 +83,22 @@ Sobald Claude die Adresse eingetragen hat:
 2. **Mit Konto anmelden** → **Das erste Konto wird automatisch Haupt-Admin** – also selbst als Erster registrieren.
 3. Einmal das Passwort der Jagdgemeinschaft eingeben – es wird im Server hinterlegt.
 4. Dasselbe in der Hochsitze-Test-App (dort ist man schon angemeldet, nur das Passwort einmal eingeben).
+
+## 9. Startseite jg-thuine (Cloudflare Pages)
+
+Unabhängig von den Schritten oben – kann auch zuerst oder später erledigt werden.
+
+1. Cloudflare → **Workers & Pages** → **Create application** → Reiter/Auswahl **Pages** → **Connect to Git**.
+2. **GitHub** wählen, anmelden und Cloudflare den Zugriff erlauben – dabei *Only select repositories* → **`Startseiten`** auswählen → **Install & Authorize**.
+3. Repo `Startseiten` wählen → **Begin setup**.
+4. Einstellungen:
+   - **Project name:** `jg-thuine` (das wird die Adresse `jg-thuine.pages.dev`)
+   - **Production branch:** `main`
+   - **Framework preset:** *None* (kein Framework)
+   - **Build command:** `exit 0`
+   - **Build output directory:** `jagd`
+   - **Root directory:** leer lassen
+5. **Save and Deploy** → nach etwa einer Minute ist die Seite unter **https://jg-thuine.pages.dev** erreichbar.
+6. Falls der Name schon vergeben ist, hängt Cloudflare etwas an – dann die tatsächliche Adresse an Claude schicken.
+
+Änderungen an der Startseite veröffentlicht Cloudflare danach automatisch, sobald Claude sie ins Repo `Startseiten` schreibt.

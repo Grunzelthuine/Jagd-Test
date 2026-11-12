@@ -442,6 +442,7 @@ async function proxy(req, env, url, ctx) {
   for (const k of ['Content-Type', 'ETag']) if (r.headers.get(k)) out.set(k, r.headers.get(k));
   out.set('Cache-Control', 'no-store');
   if (r.status === 401) return json({ fehler: 'GitHub-Token im Server ungültig oder abgelaufen – bitte Sebastian Bescheid geben.' }, 502);
+  if (r.status === 403 && (m === 'PUT' || m === 'DELETE')) return json({ fehler: `GitHub-Token im Server darf nicht in „${repo}“ schreiben – bei GitHub die Token-Rechte prüfen (Repository auswählen, Contents: Read and write).` }, 502);
   return new Response(r.body, { status: r.status, headers: out });
 }
 

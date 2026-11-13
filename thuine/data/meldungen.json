@@ -2,7 +2,7 @@
   "enc": "aes-gcm-v1",
   "hinweis": "Verschlüsselte Daten",
   "iter": 150000,
-  "salt": "Hqrb9IXFLSkuRU8NXXkQiw==",
-  "iv": "yPoEu0PghvdTlvKV",
-  "data": "EnC9bLbUF7ATGopGki/pWCR/ZnXe8QzTnN5Sd0gTpBG85oU9WMoTY3jS0vg="
+  "salt": "gY0hwUyTYKU4fZzhtEbSQQ==",
+  "iv": "83PH3ffyRciKGWrn",
+  "data": "ZIXcRi3wTOKWEB9G0JFUoJeOFvWSkUJKXl3B1O47vCSnQMAWHOq+vUCSWD4="
 }

@@ -114,6 +114,7 @@ window.Konto = (() => {
 .kt-seg button.on{background:var(--green);border-color:var(--green);color:#fff;font-weight:600}
 .kt-chk{display:flex;gap:10px;align-items:flex-start;margin-top:8px;font-size:14.5px}
 .kt-chk input{width:20px;height:20px;margin-top:1px;accent-color:var(--green);flex:none}
+.kt-sub{margin-top:10px;font-size:13px;font-weight:600;color:var(--muted)}
 .kt-msg{min-height:1.2em;color:var(--warn);font-size:14px;margin:0}
 .kt-log{list-style:none;margin:0;padding:0;font-size:13.5px}
 .kt-log li{padding:7px 0;border-top:1px solid var(--line)}.kt-log li:first-child{border-top:0}
@@ -229,7 +230,7 @@ window.Konto = (() => {
     const k = adm.konten, wart = k.filter(x => x.status === 'wartend'), rest = k.filter(x => x.status !== 'wartend');
     const appsTxt = x => Object.keys(inf.apps).map(a => {
       const v = x.apps[a]; const rr = v.rechte.map(r => inf.apps[a].rechte[r]?.split(' (')[0] || r);
-      return `${esc(appName(a))}: ${rolleTxt(v.rolle)}${rr.length && v.rolle !== 'admin' ? ' + ' + esc(rr.join(', ')) : ''}`;
+      return `${esc(appName(a))}: ${rolleTxt(v.rolle)}${rr.length && v.rolle !== 'admin' ? ' + ' + esc(rr.join(', ')) : ''}${(v.hinweise || []).length ? ' 🔔' : ''}`;
     }).join(' · ');
     const row = x => `<li><button class="kt-row" data-ktu="${esc(x.id)}"><span class="kt-ava" style="width:32px;height:32px;font-size:13px${x.status === 'gesperrt' ? ';background:var(--muted)' : ''}">${esc(initials(x.name))}</span>
         <span class="kt-n"><b>${esc(x.name)} ${x.super ? '<span class="kt-tag">Haupt-Admin</span>' : x.status === 'gesperrt' ? '<span class="kt-tag x">gesperrt</span>' : ''}</b><small>${x.super ? 'alle Rechte' : appsTxt(x)}</small></span></button>
@@ -264,7 +265,7 @@ window.Konto = (() => {
     });
   }
   function openUser(id) {
-    const x = id ? adm.konten.find(k => k.id === id) : { id: null, name: '', status: 'aktiv', apps: Object.fromEntries(Object.keys(inf.apps).map(a => [a, { rolle: 'ansehen', rechte: [] }])) };
+    const x = id ? adm.konten.find(k => k.id === id) : { id: null, name: '', status: 'aktiv', apps: Object.fromEntries(Object.keys(inf.apps).map(a => [a, { rolle: 'ansehen', rechte: [], hinweise: [] }])) };
     if (!x) return;
     const me = user();
     const apps = JSON.parse(JSON.stringify(x.apps));
@@ -275,13 +276,17 @@ window.Konto = (() => {
           <label class="field"><span>Startpasswort (mind. 6 Zeichen, bitte weitergeben)</span><input id="kuPw" autocomplete="off" autocapitalize="off" value="${esc(vorschlagPw())}"></label>`
         : `<p class="hint" style="margin:0">${x.status === 'wartend' ? '<span class="kt-tag w">wartet auf Freigabe</span>' : x.status === 'gesperrt' ? '<span class="kt-tag x">gesperrt</span>' : '<span class="kt-tag">aktiv</span>'}
             · seit ${new Date(x.erstellt).toLocaleDateString('de-DE')}${x.zuletzt ? ` · zuletzt angemeldet ${new Date(x.zuletzt).toLocaleDateString('de-DE')}` : ''}</p>`}
-        ${x.super ? '<p class="hint"><b>Haupt-Admin</b> – hat in allen Apps alle Rechte.</p>' : Object.keys(inf.apps).map(a => {
+        ${x.super ? '<p class="hint"><b>Haupt-Admin</b> – hat in allen Apps alle Rechte.</p>' : ''}
+        ${Object.keys(inf.apps).map(a => {
           const darf = me.super || me.apps?.[a]?.rolle === 'admin';
-          const v = apps[a], rechte = Object.entries(inf.apps[a].rechte || {});
+          const v = apps[a], rechte = Object.entries(inf.apps[a].rechte || {}), hinw = Object.entries(inf.apps[a].hinweise || {});
+          const hinwHtml = hinw.length ? `<div class="kt-sub">🔔 Benachrichtigung bekommen bei</div>${hinw.map(([k, t]) => `<label class="kt-chk"><input type="checkbox" data-kuhinweis="${a}:${k}" ${(v.hinweise || []).includes(k) ? 'checked' : ''} ${darf ? '' : 'disabled'}><span>${esc(t)}</span></label>`).join('')}` : '';
+          if (x.super) return hinw.length ? `<div class="kt-box"><h3>${esc(appName(a))}</h3>${hinwHtml}</div>` : '';
           return `<div class="kt-box"><h3>${esc(appName(a))}</h3>
             <div class="kt-seg" data-kurolle="${a}">${['kein', 'ansehen', 'admin'].map(r => `<button type="button" data-v="${r}" class="${v.rolle === r ? 'on' : ''}" ${darf ? '' : 'disabled'}>${rolleTxt(r)}</button>`).join('')}</div>
             ${rechte.length && v.rolle === 'ansehen' ? rechte.map(([k, t]) => `<label class="kt-chk"><input type="checkbox" data-kurecht="${a}:${k}" ${v.rechte.includes(k) ? 'checked' : ''} ${darf ? '' : 'disabled'}><span>${esc(t)}</span></label>`).join('') : ''}
             ${v.rolle === 'admin' ? '<p class="hint" style="margin:6px 0 0">Admin darf in dieser App alles ändern und Konten verwalten.</p>' : ''}
+            ${v.rolle !== 'kein' ? hinwHtml : ''}
             ${darf ? '' : '<p class="hint" style="margin:6px 0 0">Nur ein Admin dieser App kann das ändern.</p>'}</div>`;
         }).join('')}
         ${!neu && !x.super ? `<details class="kt-box"><summary style="cursor:pointer;font-weight:600">Passwort vergessen? Neues Startpasswort</summary>
@@ -293,23 +298,26 @@ window.Konto = (() => {
             <button type="button" class="btn danger" id="kuDel">${x.status === 'wartend' ? 'Anfrage ablehnen' : 'Konto löschen'}</button></div>`
           : !neu && x.status === 'wartend' ? '<div class="kt-btns"><button type="button" class="btn danger" id="kuDel">Anfrage ablehnen</button></div>' : ''}
         <p class="kt-msg" id="kuMsg"></p>`,
-        `<button class="btn secondary" id="kuBack">Zurück</button>${x.super ? '' : `<button class="btn" id="kuSave">${neu ? 'Anlegen' : x.status === 'wartend' ? 'Freigeben & speichern' : 'Speichern'}</button>`}`);
+        `<button class="btn secondary" id="kuBack">Zurück</button>${false ? '' : `<button class="btn" id="kuSave">${neu ? 'Anlegen' : x.status === 'wartend' ? 'Freigeben & speichern' : 'Speichern'}</button>`}`);
       const msg = t => { $('#kuMsg').textContent = t; };
       $$('[data-kurolle]').forEach(seg => $$('button', seg).forEach(b => b.addEventListener('click', () => { sync(); apps[seg.dataset.kurolle].rolle = b.dataset.v; draw(); })));
       $('#kuBack').addEventListener('click', () => drawAdmin());
-      const sync = () => { $$('[data-kurecht]').forEach(c => { const [a, r] = c.dataset.kurecht.split(':'); const s = new Set(apps[a].rechte); c.checked ? s.add(r) : s.delete(r); apps[a].rechte = [...s]; }); if (neu) { x.name = $('#kuName').value; x._pw = $('#kuPw').value; } };
+      const sync = () => { $$('[data-kurecht]').forEach(c => { const [a, r] = c.dataset.kurecht.split(':'); const s = new Set(apps[a].rechte); c.checked ? s.add(r) : s.delete(r); apps[a].rechte = [...s]; });
+        $$('[data-kuhinweis]').forEach(c => { const [a, h] = c.dataset.kuhinweis.split(':'); const s = new Set(apps[a].hinweise || []); c.checked ? s.add(h) : s.delete(h); apps[a].hinweise = [...s]; }); if (neu) { x.name = $('#kuName').value; x._pw = $('#kuPw').value; } };
       if (neu) { $('#kuName').value = x.name || ''; if (x._pw) $('#kuPw').value = x._pw; }
       $('#kuSave')?.addEventListener('click', async e => {
         sync();
-        const ch = Object.fromEntries(Object.entries(apps).filter(([a]) => me.super || me.apps?.[a]?.rolle === 'admin').map(([a, v]) => [a, { rolle: v.rolle, rechte: v.rolle === 'ansehen' ? v.rechte : [] }]));
+        const eigeneApps = Object.entries(apps).filter(([a]) => me.super || me.apps?.[a]?.rolle === 'admin');
+        const ch = x.super ? {} : Object.fromEntries(eigeneApps.map(([a, v]) => [a, { rolle: v.rolle, rechte: v.rolle === 'ansehen' ? v.rechte : [] }]));
+        const hw = Object.fromEntries(eigeneApps.map(([a, v]) => [a, v.rolle === 'kein' ? [] : (v.hinweise || [])]));
         const btn = e.currentTarget; btn.disabled = true;
         try {
           if (neu) {
             if ((x.name || '').trim().split(/\s+/).length < 2) throw new Error('Bitte Vor- und Nachnamen eintragen.');
-            await api('POST', '/admin/konto-neu', { name: x.name, pw: x._pw, apps: ch });
+            await api('POST', '/admin/konto-neu', { name: x.name, pw: x._pw, apps: ch, hinweise: hw });
             toast(`Konto ${x.name.trim()} angelegt ✓ – Startpasswort weitergeben.`, 4500);
           } else {
-            await api('POST', '/admin/konto', { id: x.id, apps: ch, ...(x.status === 'wartend' ? { status: 'aktiv' } : {}) });
+            await api('POST', '/admin/konto', { id: x.id, apps: ch, hinweise: hw, ...(x.status === 'wartend' ? { status: 'aktiv' } : {}) });
             toast(x.status === 'wartend' ? 'Freigegeben ✓' : 'Gespeichert ✓');
           }
           await openAdmin();
@@ -377,6 +385,11 @@ window.Konto = (() => {
     if (!CFG.push || !(isAdmin() || (hatZugang() && rechte.length))) return null;
     try { return await api('POST', '/push/senden', { app: APP, url: location.origin + location.pathname, ...msg }); } catch { return null; }
   }
+  /** Hinweis an die zuständigen Personen (z. B. „Salzlecke leer gemeldet“) */
+  async function hinweis(msg) {
+    if (!loggedIn()) return null;
+    try { return await api('POST', '/hinweis', { app: APP, url: location.origin + location.pathname, ...msg }); } catch { return null; }
+  }
   /** Abo beim Start auffrischen (falls der Browser es erneuert hat) */
   async function pushKeepAlive() {
     if (!CFG.push || !pushSupported() || Notification.permission !== 'granted' || !ld(LSP, null)) return;
@@ -386,6 +399,12 @@ window.Konto = (() => {
     if (!sub) { try { await pushEnable(); } catch { /* egal */ } }
   }
   function b64uToBytes(s) { s = s.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; return Uint8Array.from(atob(s), c => c.charCodeAt(0)); }
+  function pushText(an) {
+    const eigene = Object.entries(inf?.apps || {}).flatMap(([a, x]) => (st.user?.apps?.[a]?.hinweise || []).map(h => x.hinweise?.[h]).filter(Boolean));
+    const extra = eigene.length ? ` Außerdem, weil du dafür eingetragen bist: ${eigene.join(', ')}.` : '';
+    if (APP === 'thuine') return (an ? 'Dieses Gerät bekommt Hinweise zu Terminen, Damwild-Freigabe, erlegtem Damwild und Hirschjagd-Sperre.' : 'Hinweise zu neuen Terminen, Damwild-Freigabe, erlegtem Damwild und Hirschjagd-Sperre – auch wenn die App zu ist.') + extra;
+    return (an ? 'Dieses Gerät bekommt Benachrichtigungen.' : 'Benachrichtigungen auch bei geschlossener App.') + (extra || ' Welche du bekommst, legt Sebastian unter „Konten verwalten“ fest.');
+  }
   async function drawPushBox(box) {
     if (!pushSupported()) {
       box.innerHTML = `<p class="hint" style="margin:0">🔔 Benachrichtigungen: ${isIOS() && !standalone() ? 'Auf dem iPhone nur in der installierten App (Teilen → „Zum Home-Bildschirm“).' : 'von diesem Browser nicht unterstützt.'}</p>`;
@@ -394,7 +413,7 @@ window.Konto = (() => {
     const sub = await currentSub();
     const an = !!sub && Notification.permission === 'granted';
     box.innerHTML = `<div class="kt-box"><h3>🔔 Benachrichtigungen ${an ? '<span class="kt-tag">an</span>' : ''}</h3>
-      <p class="hint" style="margin:0">${(an ? 'Dieses Gerät bekommt Hinweise zu Terminen, Damwild-Freigabe, erlegtem Damwild und Hirschjagd-Sperre' : 'Hinweise zu neuen Terminen, Damwild-Freigabe, erlegtem Damwild und Hirschjagd-Sperre') + (isAdmin() ? ', als Admin auch zu neuen Wildmeldungen' : '') + (an ? '.' : ' – auch wenn die App zu ist.')}</p>
+      <p class="hint" style="margin:0">${pushText(an)}</p>
       <div class="kt-btns">${an ? '<button type="button" class="btn secondary" id="ktPushTest">Test senden</button><button type="button" class="btn ghost" id="ktPushOff">Ausschalten</button>' : '<button type="button" class="btn" id="ktPushOn">Benachrichtigungen erlauben</button>'}</div></div>`;
     $('#ktPushOn', box)?.addEventListener('click', async e => { e.currentTarget.disabled = true; try { await pushEnable(); toast('Benachrichtigungen an ✓'); } catch (err) { toast(err.message, 5000); } drawPushBox(box); });
     $('#ktPushOff', box)?.addEventListener('click', async () => { await pushDisable(); toast('Benachrichtigungen aus.'); drawPushBox(box); });
@@ -428,5 +447,5 @@ window.Konto = (() => {
   const ki = (bild, text, signal) => api('POST', '/ki/erlegerliste', { bild, text }, { signal });
 
   return { init, enabled, loggedIn, user, rolle, isAdmin, isAnyAdmin, hatZugang, can, token, ghBase, dataPw, refresh, abmelden, setDataPw, info, nurKonten,
-    openLogin, openAdmin, settingsHtml, wireSettings, pushSend, kiServer, ki, pushEnable, pushSupported, clearBadge };
+    openLogin, openAdmin, settingsHtml, wireSettings, pushSend, hinweis, kiServer, ki, pushEnable, pushSupported, clearBadge };
 })();

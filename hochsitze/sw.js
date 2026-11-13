@@ -4,7 +4,7 @@
  */
 importScripts('config.js');
 const PRE = (self.JAGD_CFG || {}).lsPrefix || '';   // Test-Umgebung: eigene Cache-Namen
-const VERSION = PRE + 'hs-1.12.7';
+const VERSION = PRE + 'hs-1.12.8';
 const TILES = 'hs-tiles-v1';
 const TILE_MAX = 3000;
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'config.js', 'konto.js', 'manifest.webmanifest',
@@ -17,11 +17,12 @@ self.addEventListener('install', e => {
 });
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys()
-    .then(keys => Promise.all(keys.filter(k => k.startsWith(PRE + 'hs-') && k !== VERSION && k !== TILES).map(k => caches.delete(k))))
+    .then(keys => Promise.all(keys.filter(k => k.startsWith(PRE + 'hs-') && k !== VERSION && k !== TILES && k !== BADGE).map(k => caches.delete(k))))
     .then(() => self.clients.claim()));
 });
 self.addEventListener('message', e => {
   if (e.data === 'skipWaiting') self.skipWaiting();
+  if (e.data === 'badge0') setBadge(0);
 });
 
 let trimT = null;
@@ -51,4 +52,33 @@ self.addEventListener('fetch', e => {
   if (url.origin !== location.origin) return;           // GitHub-API nie cachen
   if (url.pathname.includes('/data/')) return;          // Daten & Fotos: App kümmert sich selbst
   e.respondWith(caches.match(e.request, { ignoreSearch: true }).then(hit => hit || fetch(e.request)));
+});
+
+const BADGE = PRE + 'hs-badge';
+/* ---------- Push ---------- */
+async function getBadge() { try { const r = await (await caches.open(BADGE)).match('n'); return r ? Number(await r.text()) || 0 : 0; } catch { return 0; } }
+/* Zähler merken; die Zahl am Symbol setzt nur das Push-Ereignis (Löschen übernimmt die App beim Öffnen) */
+async function setBadge(n) {
+  try { await (await caches.open(BADGE)).put('n', new Response(String(n))); } catch { /* egal */ }
+  try { if (n > 0 && 'setAppBadge' in self.navigator) await self.navigator.setAppBadge(n); } catch { /* egal */ }
+}
+self.addEventListener('push', e => {
+  let d = {};
+  try { d = e.data ? e.data.json() : {}; } catch { d = { body: e.data ? e.data.text() : '' }; }
+  e.waitUntil((async () => {
+    await setBadge((await getBadge()) + 1);
+    await self.registration.showNotification(d.title || 'Hochsitze', {
+      body: d.body || '', tag: d.tag || undefined, icon: 'icons/icon-192.png', badge: 'icons/icon-192.png',
+      data: { url: d.url || self.registration.scope }, lang: 'de',
+    });
+  })());
+});
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  e.waitUntil((async () => {
+    const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    const c = all.find(x => x.url.startsWith(self.registration.scope));
+    if (c) return c.focus();
+    return self.clients.openWindow(e.notification.data?.url || self.registration.scope);
+  })());
 });

@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.12.7';
+const APP_VERSION = '1.12.8';
 /* Einstellungen je Installation (config.js): Konten-Server, Test-Umgebung */
 const CONF = self.JAGD_CFG || {};
 const LSP = CONF.lsPrefix || '';
@@ -370,6 +370,8 @@ async function flush() {
     rebuild(); render();
     toast('Gespeichert ✓ – für alle sichtbar.');
     for (const op of batch) for (const p of op.delFiles || []) deleteFile(p, 'Foto entfernt');
+    // Benachrichtigung an die Zuständigen (z. B. Salzlecke leer) – erst nach erfolgreichem Hochladen
+    for (const op of batch) if (op.hinweis) window.Konto?.hinweis(op.hinweis);
   } catch (e) {
     if (e instanceof NeedPassword) { updateBanner(null, 'Passwort passt nicht zur Datei auf GitHub – bitte in den Einstellungen prüfen.'); return; }
     updateBanner(null, navigator.onLine === false ? 'Kein Netz' : e.message);
@@ -1510,7 +1512,8 @@ function openZustand(id) {
     if (z === s.zustand && bem === s.bemerkung) { closeSheet(); return; }
     const n = clone(s); n.zustand = z; n.bemerkung = bem; n.geaendert = new Date().toISOString();
     closeSheet();
-    enqueue({ t: 'put', sitzId: s.id, sitzName: s.name, sitz: n, msg: `Hochsitz „${s.name}“: ${ZUSTAND[z]}${bem ? ` – ${bem}` : ''}`.slice(0, 120) });
+    enqueue({ t: 'put', sitzId: s.id, sitzName: s.name, sitz: n, msg: `Hochsitz „${s.name}“: ${ZUSTAND[z]}${bem ? ` – ${bem}` : ''}`.slice(0, 120),
+      ...(z !== 'gut' ? { hinweis: { art: 'zustand', title: `🪜 Hochsitz: ${ZUSTAND[z]}`, body: `${s.name}${bem ? ` – ${bem}` : ''} (${window.Konto?.user()?.name || 'unbekannt'})` } } : {}) });
     toast(`✓ ${s.name}: ${ZUSTAND[z]}`);
   };
 }
@@ -2033,11 +2036,13 @@ function openWartung(id, art = 'bestueckt') {
   $$('#wArt button').forEach(b => b.onclick = () => { a = b.dataset.v; $$('#wArt button').forEach(x => x.classList.toggle('on', x === b)); });
   $('#wSave').onclick = () => {
     const datum = $('#wDatum').value || todayISO();
+    const notiz = $('#wNotiz').value.trim();
     const n = clone(l);
-    n.wartung.push({ id: uid(), datum, art: a, notiz: $('#wNotiz').value.trim(), zeit: new Date().toISOString() });
+    n.wartung.push({ id: uid(), datum, art: a, notiz, zeit: new Date().toISOString() });
     n.geaendert = new Date().toISOString();
     closeSheet();
-    enqueue({ t: 'put', coll: 'lecken', sitzId: id, sitzName: l.name, sitz: n, msg: `Salzlecke „${l.name}“: ${WARTUNG[a]} ${dateDE(datum)}` });
+    enqueue({ t: 'put', coll: 'lecken', sitzId: id, sitzName: l.name, sitz: n, msg: `Salzlecke „${l.name}“: ${WARTUNG[a]} ${dateDE(datum)}`,
+      ...(a === 'leer' ? { hinweis: { art: 'leer', title: '🧂 Salzlecke leer gemeldet', body: `${l.name}${notiz ? ` – ${notiz}` : ''} (${dateDE(datum)}, ${window.Konto?.user()?.name || 'unbekannt'})` } } : {}) });
     toast(`✓ ${l.name}: ${WARTUNG[a]}`);
   };
 }

@@ -28,9 +28,14 @@ const CONFIG = {
         freigabe: 'Damwild-Freigabe ändern',
         sperre: 'Hirschjagd-Sperre setzen und aufheben',
       },
+      // Benachrichtigungen, die der Admin je Person an- oder abhaken kann.
+      // darf = wer sie auslösen darf (Einzelrechte; Admins immer; 'mitglied' = jedes Konto)
+      hinweise: {
+        meldung: { name: 'Neue Wildmeldung', darf: 'mitglied' },
+      },
       // Erste passende Regel zählt. write: 'admin' | 'mitglied' | [Einzelrechte]
       regeln: [
-        // meldenPush: bei neuer Wildmeldung Benachrichtigung an die Admin-Geräte (ersetzt ntfy)
+        // meldenPush: bei neuer Wildmeldung Benachrichtigung an alle mit Hinweis „meldung“ (ersetzt ntfy)
         { repo: 'Jagd-Test', pfad: 'thuine/data/meldungen.json', write: 'mitglied', meldenPush: true },
         { repo: 'Jagd-Test', pfad: 'thuine/data/strecke.json', write: ['termine', 'freigabe', 'sperre'] },
         { repo: 'Jagd-Test', pfad: 'thuine/', write: 'admin' },
@@ -42,6 +47,10 @@ const CONFIG = {
         zustand: 'Hochsitz-Zustand ändern (Mängel, gesperrt)',
         lecke: 'Salzlecken abhaken (bestückt, kontrolliert)',
         leer: 'Salzlecke als leer melden',
+      },
+      hinweise: {
+        leer: { name: 'Salzlecke leer gemeldet', darf: ['leer', 'lecke'] },
+        zustand: { name: 'Hochsitz-Mängel gemeldet', darf: ['zustand'] },
       },
       regeln: [
         { repo: 'Jagd-Test', pfad: 'hochsitze/data/hochsitze.json', write: ['zustand', 'lecke', 'leer'] },
@@ -120,6 +129,7 @@ async function route(req, env, ctx) {
   if (p === '/push/abmelden' && m === 'POST') return pushAbmelden(req, env);
   if (p === '/push/senden' && m === 'POST') return pushSendenRoute(req, env, ctx);
   if (p === '/push/test' && m === 'POST') return pushTest(req, env);
+  if (p === '/hinweis' && m === 'POST') return hinweisRoute(req, env, ctx);
   fail(404, 'Unbekannte Adresse');
 }
 
@@ -134,7 +144,7 @@ async function info(env) {
   const [users, settings, vapid] = await Promise.all([getUsers(env), getSettings(env), getVapid(env)]);
   return {
     name: CONFIG.name,
-    apps: Object.fromEntries(Object.entries(CONFIG.apps).map(([k, a]) => [k, { name: a.name, rechte: a.rechte }])),
+    apps: Object.fromEntries(Object.entries(CONFIG.apps).map(([k, a]) => [k, { name: a.name, rechte: a.rechte, hinweise: Object.fromEntries(Object.entries(a.hinweise || {}).map(([h, x]) => [h, x.name])) }])),
     nurKonten: !!settings.nurKonten,
     ersterNutzer: !Object.keys(users).length,
     vapid: vapid.pub,
@@ -194,12 +204,18 @@ const appRolle = (u, app) => u.super ? 'admin' : (u.apps?.[app]?.rolle || 'anseh
 const isAppAdmin = (u, app) => u.status === 'aktiv' && appRolle(u, app) === 'admin';
 const hatZugang = (u, app) => u.status === 'aktiv' && appRolle(u, app) !== 'kein';
 const hatRecht = (u, app, r) => isAppAdmin(u, app) || (hatZugang(u, app) && (u.apps?.[app]?.rechte || []).includes(r));
+/** Welche Hinweise bekommt das Konto? Ohne eigene Auswahl: Admins alle, sonst keine */
+const hinweiseVon = (u, app) => {
+  const alle = Object.keys(CONFIG.apps[app].hinweise || {});
+  const eigen = u.hinweise?.[app];
+  return Array.isArray(eigen) ? eigen.filter(h => alle.includes(h)) : (isAppAdmin(u, app) ? alle : []);
+};
 const isAnyAdmin = u => u.super || Object.keys(CONFIG.apps).some(a => isAppAdmin(u, a));
 
 function publicUser(u) {
   return {
     id: u.id, name: u.name, status: u.status, super: !!u.super, erstellt: u.erstellt, zuletzt: u.zuletzt || null,
-    apps: Object.fromEntries(Object.keys(CONFIG.apps).map(a => [a, { rolle: appRolle(u, a), rechte: u.apps?.[a]?.rechte || [] }])),
+    apps: Object.fromEntries(Object.keys(CONFIG.apps).map(a => [a, { rolle: appRolle(u, a), rechte: u.apps?.[a]?.rechte || [], hinweise: hinweiseVon(u, a) }])),
   };
 }
 async function ichAntwort(u, env) {
@@ -310,6 +326,16 @@ async function adminKontoAendern(req, env) {
       if (alt !== JSON.stringify({ rolle, rechte })) was.push(`${CONFIG.apps[a].name}: ${rolle}${rechte.length ? ' + ' + rechte.join(', ') : ''}`);
     }
   }
+  if (b.hinweise && typeof b.hinweise === 'object') {
+    for (const [a, list] of Object.entries(b.hinweise)) {
+      if (!CONFIG.apps[a] || !Array.isArray(list)) continue;
+      if (!isAppAdmin(me, a)) fail(403, `Keine Admin-Rechte für ${CONFIG.apps[a].name}.`);
+      const neu = list.filter(h => h in (CONFIG.apps[a].hinweise || {}));
+      const alt = hinweiseVon(u, a);
+      u.hinweise ||= {}; u.hinweise[a] = neu;
+      if (JSON.stringify(alt.slice().sort()) !== JSON.stringify(neu.slice().sort())) was.push(`${CONFIG.apps[a].name}: Benachrichtigungen ${neu.length ? neu.map(h => CONFIG.apps[a].hinweise[h].name).join(', ') : 'keine'}`);
+    }
+  }
   if (b.neuesPw) { checkNewPw(b.neuesPw); u.pw = await hashPw(b.neuesPw); u.sv = (u.sv || 0) + 1; u.fehl = 0; delete u.sperrBis; was.push('Passwort neu gesetzt'); }
   if (b.name && normName(b.name) !== u.name) {
     const n = normName(b.name); checkName(n);
@@ -330,6 +356,10 @@ async function adminKontoNeu(req, env) {
   for (const [a, v] of Object.entries(b.apps || {})) {
     if (!CONFIG.apps[a] || !isAppAdmin(me, a)) continue;
     u.apps[a] = { rolle: ['ansehen', 'admin', 'kein'].includes(v.rolle) ? v.rolle : 'ansehen', rechte: (v.rechte || []).filter(r => r in CONFIG.apps[a].rechte) };
+  }
+  for (const [a, list] of Object.entries(b.hinweise || {})) {
+    if (!CONFIG.apps[a] || !isAppAdmin(me, a) || !Array.isArray(list)) continue;
+    u.hinweise ||= {}; u.hinweise[a] = list.filter(h => h in (CONFIG.apps[a].hinweise || {}));
   }
   users[u.id] = u;
   await putUsers(env, users);
@@ -440,7 +470,7 @@ async function proxy(req, env, url, ctx) {
     const was = String(payload?._orig || (m === 'DELETE' ? 'Datei gelöscht' : 'Änderung')).slice(0, 200);
     ctx.waitUntil(log(env, u, was, { app, pfad }));
     if (regel.meldenPush && m === 'PUT' && /^Meldung:/.test(was)) {
-      ctx.waitUntil(sendeAnAlle(env, app, { title: '📬 Neue Wildmeldung', body: `${was.replace(/^Meldung:\s*/, '')} – in der App übernehmen`, tag: 'meldung-' + Date.now() }, x => isAppAdmin(x, app)).catch(() => {}));
+      ctx.waitUntil(sendeHinweis(env, app, 'meldung', { title: '📬 Neue Wildmeldung', body: `${was.replace(/^Meldung:\s*/, '')} – in der App übernehmen`, tag: 'meldung-' + Date.now() }).catch(() => {}));
     }
   }
   const out = new Headers();
@@ -562,6 +592,37 @@ async function sendeAnAlle(env, app, msg, nur = null) {
   });
   await kvPut(env, subKey(app), subs);
   return { ok, entfernt: weg, fehler, gesamt: ids.length };
+}
+/** Hinweis an alle Konten, die ihn abonniert haben (Admin hakt je Person an).
+    Gerät: Abo in dieser App; hat die Person dort keins, ihre Abos in den anderen Apps. */
+async function sendeHinweis(env, app, art, msg) {
+  const users = await getUsers(env);
+  const ziel = new Set(Object.values(users).filter(u => hatZugang(u, app) && hinweiseVon(u, app).includes(art)).map(u => u.id));
+  if (!ziel.size) return { ok: 0, gesamt: 0 };
+  const apps = [app, ...Object.keys(CONFIG.apps).filter(a => a !== app)];
+  const erreicht = new Set(); let ok = 0;
+  for (const a of apps) {
+    const subs = await kvGet(env, subKey(a), {});
+    const offen = new Set([...ziel].filter(id => !erreicht.has(id)));
+    if (!offen.size) break;
+    const hier = new Set(Object.values(subs).map(s => s.user).filter(id => offen.has(id)));
+    if (!hier.size) continue;
+    const r = await sendeAnAlle(env, a, { ...msg, app }, x => !!x && hier.has(x.id));
+    ok += r.ok; hier.forEach(id => erreicht.add(id));
+  }
+  return { ok, gesamt: ziel.size };
+}
+async function hinweisRoute(req, env, ctx) {
+  const u = await auth(req, env);
+  const b = await body(req);
+  const H = CONFIG.apps[b.app]?.hinweise?.[b.art];
+  if (!H) fail(400, 'Unbekannter Hinweis.');
+  const darf = isAppAdmin(u, b.app) || (H.darf === 'mitglied' ? hatZugang(u, b.app) : (H.darf || []).some(r => hatRecht(u, b.app, r)));
+  if (!darf) fail(403, 'Keine Berechtigung für diesen Hinweis.');
+  const msg = { title: String(b.title || H.name).slice(0, 80), body: String(b.body || '').slice(0, 300), tag: `${b.art}-${Date.now()}`, url: String(b.url || '').slice(0, 300) };
+  const r = await sendeHinweis(env, b.app, b.art, msg);
+  ctx.waitUntil(log(env, u, `Benachrichtigung „${H.name}“: ${msg.body}`.slice(0, 200), { app: b.app }));
+  return json(r);
 }
 async function vapidHeader(env, endpoint) {
   const v = await getVapid(env);

@@ -3,6 +3,7 @@
 self.JAGD_CFG = {
   app: 'hochsitze',
   api: 'https://jagd-test.sebastian-bruns.workers.dev',
+  push: true,
   test: true,
   lsPrefix: 'test.',          // eigener Gerätespeicher – getrennt von der echten App
   owner: 'Grunzelthuine',

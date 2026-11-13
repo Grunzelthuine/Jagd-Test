@@ -30,7 +30,8 @@ const CONFIG = {
       },
       // Erste passende Regel zählt. write: 'admin' | 'mitglied' | [Einzelrechte]
       regeln: [
-        { repo: 'Jagd-Test', pfad: 'thuine/data/meldungen.json', write: 'mitglied' },
+        // meldenPush: bei neuer Wildmeldung Benachrichtigung an die Admin-Geräte (ersetzt ntfy)
+        { repo: 'Jagd-Test', pfad: 'thuine/data/meldungen.json', write: 'mitglied', meldenPush: true },
         { repo: 'Jagd-Test', pfad: 'thuine/data/strecke.json', write: ['termine', 'freigabe', 'sperre'] },
         { repo: 'Jagd-Test', pfad: 'thuine/', write: 'admin' },
       ],
@@ -437,6 +438,9 @@ async function proxy(req, env, url, ctx) {
   if (r.ok && (m === 'PUT' || m === 'DELETE')) {
     const was = String(payload?._orig || (m === 'DELETE' ? 'Datei gelöscht' : 'Änderung')).slice(0, 200);
     ctx.waitUntil(log(env, u, was, { app, pfad }));
+    if (regel.meldenPush && m === 'PUT' && /^Meldung:/.test(was)) {
+      ctx.waitUntil(sendeAnAlle(env, app, { title: '📬 Neue Wildmeldung', body: `${was.replace(/^Meldung:\s*/, '')} – in der App übernehmen`, tag: 'meldung-' + Date.now() }, x => isAppAdmin(x, app)).catch(() => {}));
+    }
   }
   const out = new Headers();
   for (const k of ['Content-Type', 'ETag']) if (r.headers.get(k)) out.set(k, r.headers.get(k));
@@ -541,12 +545,13 @@ async function pushTest(req, env) {
   const st = await sendePush(env, s, { title: CONFIG.apps[b.app].name, body: 'Test – Benachrichtigungen funktionieren ✓', tag: 'test' });
   return json({ ok: st >= 200 && st < 300, status: st });
 }
-async function sendeAnAlle(env, app, msg) {
+async function sendeAnAlle(env, app, msg, nur = null) {
   const subs = await kvGet(env, subKey(app), {});
   const users = await getUsers(env);
   // nur Geräte von Konten, die (noch) Zugang haben
   for (const [k, v] of Object.entries(subs)) { const u = users[v.user]; if (!u || !hatZugang(u, app)) delete subs[k]; }
-  const ids = Object.keys(subs).slice(0, 45); // Grenze kostenloser Plan: 50 Anfragen je Aufruf
+  // optional nur bestimmte Konten (z. B. Admins bei Wildmeldungen)
+  const ids = Object.keys(subs).filter(k => !nur || nur(users[subs[k].user])).slice(0, 45); // Grenze kostenloser Plan: 50 Anfragen je Aufruf
   let ok = 0, weg = 0, fehler = 0;
   const results = await Promise.all(ids.map(id => sendePush(env, subs[id], msg).catch(() => 0)));
   results.forEach((st, i) => {
@@ -555,7 +560,7 @@ async function sendeAnAlle(env, app, msg) {
     else fehler++;
   });
   await kvPut(env, subKey(app), subs);
-  return { ok, entfernt: weg, fehler, gesamt: Object.keys(subs).length };
+  return { ok, entfernt: weg, fehler, gesamt: ids.length };
 }
 async function vapidHeader(env, endpoint) {
   const v = await getVapid(env);

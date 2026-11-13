@@ -394,7 +394,7 @@ window.Konto = (() => {
     const sub = await currentSub();
     const an = !!sub && Notification.permission === 'granted';
     box.innerHTML = `<div class="kt-box"><h3>🔔 Benachrichtigungen ${an ? '<span class="kt-tag">an</span>' : ''}</h3>
-      <p class="hint" style="margin:0">${an ? 'Dieses Gerät bekommt Hinweise zu Terminen, Damwild-Freigabe, erlegtem Damwild und Hirschjagd-Sperre.' : 'Hinweise zu neuen Terminen, Damwild-Freigabe, erlegtem Damwild und Hirschjagd-Sperre – auch wenn die App zu ist.'}</p>
+      <p class="hint" style="margin:0">${(an ? 'Dieses Gerät bekommt Hinweise zu Terminen, Damwild-Freigabe, erlegtem Damwild und Hirschjagd-Sperre' : 'Hinweise zu neuen Terminen, Damwild-Freigabe, erlegtem Damwild und Hirschjagd-Sperre') + (isAdmin() ? ', als Admin auch zu neuen Wildmeldungen' : '') + (an ? '.' : ' – auch wenn die App zu ist.')}</p>
       <div class="kt-btns">${an ? '<button type="button" class="btn secondary" id="ktPushTest">Test senden</button><button type="button" class="btn ghost" id="ktPushOff">Ausschalten</button>' : '<button type="button" class="btn" id="ktPushOn">Benachrichtigungen erlauben</button>'}</div></div>`;
     $('#ktPushOn', box)?.addEventListener('click', async e => { e.currentTarget.disabled = true; try { await pushEnable(); toast('Benachrichtigungen an ✓'); } catch (err) { toast(err.message, 5000); } drawPushBox(box); });
     $('#ktPushOff', box)?.addEventListener('click', async () => { await pushDisable(); toast('Benachrichtigungen aus.'); drawPushBox(box); });

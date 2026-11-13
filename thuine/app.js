@@ -26,7 +26,7 @@ async function repairApp() {
 window.addEventListener('error', e => showRescue(e.message));
 window.addEventListener('unhandledrejection', e => { if (!(e.reason && e.reason.name === 'AbortError')) showRescue(e.reason?.message || e.reason); });
 
-const APP_VERSION = '2.24.5';
+const APP_VERSION = '2.24.6';
 /* Einstellungen je Installation (config.js): Konten-Server, Test-Umgebung, abweichende Speicherorte */
 const CONF = self.JAGD_CFG || {};
 const LSP = CONF.lsPrefix || '';
@@ -612,11 +612,12 @@ function pushNachSpeichern() {
   state.pushBase = neu;
   if (!alt || !CONF.push || !window.Konto?.loggedIn() || !canSpeichern()) return;
   const msgs = [];
-  const vorher = new Map(alt.termine.map(t => [t.id, JSON.stringify(t)]));
+  const ohneZeit = t => { const { erstellt, geaendert, ...r } = t; return JSON.stringify(r); };
+  const vorher = new Map(alt.termine.map(t => [t.id, ohneZeit(t)]));
   const neuT = [], geaendertT = [];
   for (const t of neu.termine) {
     if (!t.datum || t.datum < todayISO()) continue;
-    if (!vorher.has(t.id)) neuT.push(t); else if (vorher.get(t.id) !== JSON.stringify(t)) geaendertT.push(t);
+    if (!vorher.has(t.id)) neuT.push(t); else if (vorher.get(t.id) !== ohneZeit(t)) geaendertT.push(t);
   }
   if (neuT.length > 2) msgs.push({ title: `${neuT.length} neue Termine`, body: neuT.slice(0, 3).map(t => `${terminTitel(t)} ${dateDE(t.datum)}`).join(' · ') + (neuT.length > 3 ? ' …' : ''), tag: 'termine' });
   else neuT.forEach(t => msgs.push({ title: 'Neuer Termin', body: `${terminTitel(t)} – ${terminWann(t)}`, tag: 'termin-' + t.id }));
@@ -748,7 +749,8 @@ function openMelden() {
       try {
         await changeMeldungen(list => [...list, rec], `Meldung: ${meldText(rec)} von ${shooterName(rec.von)}`);
         closeSheet(); toast('Gemeldet ✓ – danke! Sebastian trägt es ein.', 4000);
-        sendPush(ntfyTopic(), 'Neue Wildmeldung', `${meldText(rec)}${rec.datum ? ` am ${dateDE(rec.datum)}` : ' (Datum unbekannt)'} – in der App übernehmen`);
+        // Mit Konto benachrichtigt der Konten-Server die Admins selbst – dann kein ntfy (sonst doppelt)
+        if (!viaKonto()) sendPush(ntfyTopic(), 'Neue Wildmeldung', `${meldText(rec)}${rec.datum ? ` am ${dateDE(rec.datum)}` : ' (Datum unbekannt)'} – in der App übernehmen`);
       } catch (err) { btn.disabled = false; btn.textContent = 'Melden'; toast(err.message || 'Senden fehlgeschlagen – Internet prüfen.', 4500); }
     });
   };
@@ -1129,15 +1131,22 @@ async function migrateWildverteilung() {
 /* ---------- Sperre Hirschjagd (nach Fehlabschuss, i. d. R. 4 Wochen) ---------- */
 const hirschSperre = () => { const sp = state.data?.hirschSperre; return sp?.bis && sp.bis >= todayISO() ? sp : null; };
 function addDaysISO(iso, n) { const [y, m, d] = iso.split('-').map(Number); const t = new Date(y, m - 1, d + n); return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`; }
-function sperreBanner() {
+/* Startseite: Jeder kann die Sperre für sich als „gelesen“ bestätigen – dann verschwindet sie dort (nur auf diesem Gerät).
+   Eine neue oder geänderte Sperre erscheint wieder. Auf der Damwild-Seite bleibt sie immer sichtbar. */
+const LS_SPERRE_OK = 'sb.sperreGelesen.v1';
+const sperreKey = sp => [sp.seit || '', sp.bis, sp.grund || ''].join('|');
+const sperreGelesen = sp => lsGet(LS_SPERRE_OK, '') === sperreKey(sp);
+function sperreBanner(start = false) {
   const sp = hirschSperre(); if (!sp) return '';
+  if (start && sperreGelesen(sp)) return '';
   const [y, m, d] = sp.bis.split('-').map(Number), [ty, tm, td] = todayISO().split('-').map(Number);
   const rest = Math.round((new Date(y, m - 1, d) - new Date(ty, tm - 1, td)) / 864e5) + 1;
   return `<div class="sperre" role="alert">
     <div class="sp-icon" aria-hidden="true">⛔</div>
-    <div><b class="sp-title">Hirschjagd gesperrt</b>
+    <div class="sp-txt"><b class="sp-title">Hirschjagd gesperrt</b>
       <span>bis einschließlich <b>${esc(dateDE(sp.bis, true))}</b> · noch ${rest} Tag${rest === 1 ? '' : 'e'}</span>
       ${sp.grund ? `<small>${esc(sp.grund)}</small>` : ''}</div>
+    ${start ? '<button type="button" class="sp-ok" id="spGesehen" aria-label="Gelesen – vom Startbildschirm ausblenden">✓ Gelesen</button>' : ''}
   </div>`;
 }
 function openSperre() {
@@ -2930,6 +2939,10 @@ function openTermin(id) {
     const rec = { id: ex?.id || `t-${Date.now().toString(36)}`, datum, zeit: $('#tmZeit').value, art: $('#tmArt').value, titel: $('#tmTitel').value.trim(),
       ort: $('#tmOrt').value.trim(), leitungGruppe: sel.startsWith('grp:') ? sel.slice(4) : '', leitungId: sel && sel !== '__frei' && !sel.startsWith('grp:') ? sel : '', leitung: sel === '__frei' ? $('#tmLeiFrei').value.trim() : '', besonderheit: $('#tmBes').value.trim() };
     Object.keys(rec).forEach(k => { if (rec[k] === '') delete rec[k]; });
+    // Für „Neuigkeiten“ auf der Startseite: wann eingetragen bzw. zuletzt geändert
+    const jetzt = new Date().toISOString();
+    rec.erstellt = ex?.erstellt || jetzt;
+    if (ex) { const { erstellt: e1, geaendert: g1, ...alt } = ex, { erstellt: e2, geaendert: g2, ...neu } = rec; if (JSON.stringify(alt) !== JSON.stringify(neu)) rec.geaendert = jetzt; else if (ex.geaendert) rec.geaendert = ex.geaendert; }
     state.data.termine = ex ? state.data.termine.map(x => x.id === ex.id ? rec : x) : [...state.data.termine, rec];
     closeSheet(); persist(`Termin: ${terminTitel(rec)} ${dateDE(datum)}`); renderTermine();
   });
@@ -3034,7 +3047,7 @@ function openIcsImport(list) {
     const pick = $$('[data-icsi]:checked').map(c => list[+c.dataset.icsi]);
     const stamp = Date.now().toString(36);
     const neu = pick.map((t, i) => {
-      const rec = { id: `t-${stamp}${i}`, uid: t.uid, datum: t.datum, zeit: t.zeit, art: t.art, titel: t.titel, ort: t.ort, leitungId: t.leitungId, leitung: t.leitung, besonderheit: t.besonderheit };
+      const rec = { id: `t-${stamp}${i}`, uid: t.uid, datum: t.datum, zeit: t.zeit, art: t.art, titel: t.titel, ort: t.ort, leitungId: t.leitungId, leitung: t.leitung, besonderheit: t.besonderheit, erstellt: new Date().toISOString() };
       Object.keys(rec).forEach(k => { if (!rec[k]) delete rec[k]; });
       return rec;
     });
@@ -3261,6 +3274,52 @@ function openInstallHilfeOrPrompt() {
   } else openInstallHilfe();
 }
 
+/* ---------- Neuigkeiten auf der Startseite ----------
+   Die letzten Änderungen der vergangenen 14 Tage: erlegtes Damwild (mit Wildbret-Gruppe),
+   neue/geänderte Termine, Damwild-Freigabe. Niederwild und Rehwild bewusst nicht. */
+const NEWS_TAGE = 14;
+const NEWS_ICO = {
+  termin: '<svg viewBox="0 0 24 24"><rect x="4" y="5.5" width="16" height="14" rx="2.2"/><path d="M4 10h16M8.5 3.5v4M15.5 3.5v4"/></svg>',
+  damm: '<svg viewBox="0 0 24 24"><path d="M12 21c-1.8 0-3-2.6-3-5.2 0-1.9 1.2-3.3 3-3.3s3 1.4 3 3.3C15 18.4 13.8 21 12 21z"/><path d="M9.6 13.2 6.5 10 4 10.5M6.5 10 5.6 6.6M6.5 10l-.3-3.6M14.4 13.2l3.1-3.2 2.5.5M17.5 10l.9-3.4M17.5 10l.3-3.6"/></svg>',
+  frei: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="m8 12.3 2.7 2.7L16.2 9.4"/></svg>',
+};
+function neuigkeiten() {
+  const heute = todayISO(), ab = addDaysISO(heute, -NEWS_TAGE), items = [];
+  const plan = state.schalen ? wildbretPlan() : null;
+  if (plan) plan.list.filter(x => x.datum && x.datum >= ab && x.datum <= heute).forEach(x => items.push({
+    tag: x.datum, sort: x.datum + (x.zeit || ''), go: 'schalen', ico: 'damm',
+    titel: `Damwild erlegt · ${katName('damm', x.kat)}`,
+    text: `${dateDE(x.datum)} · Wildbret: ${gruppeLabel(plan.map[x.id] || 'keine')}`,
+  }));
+  (state.data.termine || []).filter(t => t.datum >= heute).forEach(t => {
+    const neu = t.erstellt && t.erstellt.slice(0, 10) >= ab, geaendert = t.geaendert && t.geaendert.slice(0, 10) >= ab;
+    if (!neu && !geaendert) return;
+    const wann = geaendert ? t.geaendert : t.erstellt;
+    items.push({ tag: wann.slice(0, 10), sort: wann, go: 'termine', ico: 'termin',
+      titel: `${geaendert ? 'Termin geändert' : 'Neuer Termin'} · ${terminTitel(t)}`,
+      text: `${dateDE(t.datum, true)}${t.zeit ? `, ${t.zeit} Uhr` : ''}` });
+  });
+  const fgStand = state.data.damFreigabeStand;
+  if (fgStand && fgStand >= ab && fgStand <= heute) {
+    const frei = fgKats().filter(x => damStatus(x.k, heute).art === 'frei').map(x => x.lbl);
+    items.push({ tag: fgStand, sort: fgStand, go: 'schalen', ico: 'frei', titel: 'Damwild-Freigabe geändert', text: frei.length ? `Frei: ${frei.join(', ')}` : 'Zurzeit nichts frei' });
+  }
+  return items.sort((a, b) => b.sort.localeCompare(a.sort)).slice(0, 4);
+}
+function newsKachel() {
+  if (state.season !== seasonOf(todayISO())) return '';
+  const n = neuigkeiten();
+  if (!n.length) return '';
+  const wann = iso => { const d = Math.round((new Date(todayISO()) - new Date(iso)) / 864e5); return d <= 0 ? 'heute' : d === 1 ? 'gestern' : `vor ${d} Tagen`; };
+  return `<div class="start-tile news-tile">
+    <span class="st-title">Neuigkeiten</span>
+    ${n.map(x => `<button type="button" class="news-row" data-go="${x.go}">
+      <span class="news-ico" aria-hidden="true">${NEWS_ICO[x.ico]}</span>
+      <span class="news-txt"><b>${esc(x.titel)}</b><small>${esc(x.text)}</small></span>
+      <span class="news-when">${wann(x.tag)}</span>
+    </button>`).join('')}
+  </div>`;
+}
 function renderStart() {
   const el = $('#view-start');
   if (!el || !state.data) return;
@@ -3277,7 +3336,7 @@ function renderStart() {
         ${state.season === seasonOf(todayISO()) ? '<span class="hs-now">aktuelles Jagdjahr</span>' : `<button type="button" class="hs-back" id="heroNow">zurück zu ${seasonOf(todayISO())}</button>`}
       </label>
     </div>
-    ${sperreBanner()}
+    ${sperreBanner(true)}
     ${erinnerungBanner()}
     ${installAngebot(true) ? `<button class="start-tile inst-tile" id="btnInstall"><span class="st-title">📲 App installieren</span><span class="st-meta">${installPrompt ? 'Ein Tipp – dann liegt Jagd Thuine auf dem Startbildschirm' : 'So kommt Jagd Thuine auf den Startbildschirm'}</span><span class="st-go" aria-hidden="true">›</span></button>` : ''}
     ${isAdmin() && state.meldungen.length ? `<button class="start-tile ml-tile" id="btnMeldungen"><span class="st-title">📬 ${state.meldungen.length} neue Meldung${state.meldungen.length === 1 ? '' : 'en'}</span><span class="st-meta">antippen zum Prüfen und Übernehmen</span><span class="st-go" aria-hidden="true">›</span></button>` : ''}
@@ -3286,6 +3345,7 @@ function renderStart() {
       <span class="st-meta">Erlegtes Stück oder Fallwild melden</span>
       <span class="st-go" aria-hidden="true">›</span>
     </button>` : ''}
+    ${newsKachel()}
     <button class="start-tile" data-go="termine">
       <span class="st-title">Termine</span>
       ${kommend.length ? kommend.slice(0, 2).map(t => `<span class="st-tm">
@@ -3310,6 +3370,7 @@ function renderStart() {
       <span class="st-go" aria-hidden="true">›</span>
     </button>`;
   $('#btnMelden')?.addEventListener('click', openMelden);
+  $('#spGesehen')?.addEventListener('click', () => { const sp = hirschSperre(); if (sp) lsSet(LS_SPERRE_OK, sperreKey(sp)); renderStart(); toast('Ausgeblendet – die Sperre steht weiter auf der Damwild-Seite.', 3500); });
   $('#btnInstall')?.addEventListener('click', () => startInstall(true));
   $('#btnMeldungen')?.addEventListener('click', openMeldungen);
   const setSeason = v => { const sel = $('#seasonSelect'); sel.value = v; sel.dispatchEvent(new Event('change')); };

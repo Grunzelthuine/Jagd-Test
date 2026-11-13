@@ -657,3 +657,19 @@ input[type="date"]::-webkit-date-and-time-value, input[type="time"]::-webkit-dat
 .wb-akt-top { margin-top: 14px; margin-bottom: 0; box-shadow: var(--shadow); }
 .wb-akt-top { margin-top: 16px; }
 .wb-akt-top + .kk-stack { margin-top: 10px; }
+
+/* v2.23.3 Sperre auf der Startseite als „gelesen“ ausblenden */
+.sperre .sp-ok { flex: none; align-self: center; margin-left: auto; min-height: 40px; padding: 6px 12px; border: 1px solid rgba(255,255,255,.6); border-radius: 10px; background: rgba(255,255,255,.15); color: #fff; font: 600 14px/1 var(--sans); white-space: nowrap; cursor: pointer; }
+.sperre .sp-ok:active { background: rgba(255,255,255,.3); }
+.sperre .sp-txt { display: grid; gap: 3px; min-width: 0; }
+
+/* v2.24.6 Neuigkeiten auf der Startseite */
+.news-tile { padding-right: 16px; }
+.news-tile .news-row { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 8px 0; border: 0; border-top: 1px solid var(--line); background: none; color: inherit; font: inherit; cursor: pointer; }
+.news-tile .st-title + .news-row { border-top: 0; padding-top: 2px; }
+.news-ico { flex: none; width: 34px; height: 34px; border-radius: 10px; background: var(--green-soft, #dfe6cf); display: grid; place-items: center; align-self: flex-start; }
+.news-ico svg { width: 21px; height: 21px; fill: none; stroke: var(--green); stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.news-txt { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.news-txt b { font-size: 14.5px; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+.news-txt small { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.news-when { flex: none; align-self: flex-start; font-size: 12px; color: var(--muted); padding-top: 2px; white-space: nowrap; }

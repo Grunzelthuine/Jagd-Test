@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.12.4';
+const APP_VERSION = '1.12.5';
 /* Einstellungen je Installation (config.js): Konten-Server, Test-Umgebung */
 const CONF = self.JAGD_CFG || {};
 const LSP = CONF.lsPrefix || '';

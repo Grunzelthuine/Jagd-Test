@@ -2,7 +2,7 @@
   "enc": "aes-gcm-v1",
   "hinweis": "Verschlüsselte Daten",
   "iter": 150000,
-  "salt": "RY5Xxn0sbW4aa5zGlRy1lg==",
-  "iv": "uDVuV4XsL8v9Lfij",
-  "data": "VaafT2P5HgBCaV/0lXfiIetcXnZw5+BQw56vetHkYNt8qLlekeYaAP79XYN3tIBciEPLGBfH1rOtKHOxsSxI0e1EwsKIOJs1LWy8rMXZZLv9MzpeZywqGNLgUJswZw0w1A4EBkRNhW1BllODK9YodRIL95YzcgDrApGewTK0PZ15f9oeWojGRGqSM4RykjP6M7Emf9k7FNd/y82fk3CxR0V/Pk786rUjG8aXoCnMpTM+"
+  "salt": "Hqrb9IXFLSkuRU8NXXkQiw==",
+  "iv": "yPoEu0PghvdTlvKV",
+  "data": "EnC9bLbUF7ATGopGki/pWCR/ZnXe8QzTnN5Sd0gTpBG85oU9WMoTY3jS0vg="
 }

@@ -26,7 +26,7 @@ async function repairApp() {
 window.addEventListener('error', e => showRescue(e.message));
 window.addEventListener('unhandledrejection', e => { if (!(e.reason && e.reason.name === 'AbortError')) showRescue(e.reason?.message || e.reason); });
 
-const APP_VERSION = '2.24.6';
+const APP_VERSION = '2.24.7';
 /* Einstellungen je Installation (config.js): Konten-Server, Test-Umgebung, abweichende Speicherorte */
 const CONF = self.JAGD_CFG || {};
 const LSP = CONF.lsPrefix || '';
@@ -612,7 +612,7 @@ function pushNachSpeichern() {
   state.pushBase = neu;
   if (!alt || !CONF.push || !window.Konto?.loggedIn() || !canSpeichern()) return;
   const msgs = [];
-  const ohneZeit = t => { const { erstellt, geaendert, ...r } = t; return JSON.stringify(r); };
+  const ohneZeit = t => { const { erstellt, geaendert, aenderung, ...r } = t; return JSON.stringify(r); };
   const vorher = new Map(alt.termine.map(t => [t.id, ohneZeit(t)]));
   const neuT = [], geaendertT = [];
   for (const t of neu.termine) {
@@ -621,7 +621,7 @@ function pushNachSpeichern() {
   }
   if (neuT.length > 2) msgs.push({ title: `${neuT.length} neue Termine`, body: neuT.slice(0, 3).map(t => `${terminTitel(t)} ${dateDE(t.datum)}`).join(' · ') + (neuT.length > 3 ? ' …' : ''), tag: 'termine' });
   else neuT.forEach(t => msgs.push({ title: 'Neuer Termin', body: `${terminTitel(t)} – ${terminWann(t)}`, tag: 'termin-' + t.id }));
-  geaendertT.slice(0, 2).forEach(t => msgs.push({ title: 'Termin geändert', body: `${terminTitel(t)} – ${terminWann(t)}`, tag: 'termin-' + t.id }));
+  geaendertT.slice(0, 2).forEach(t => msgs.push({ title: `Termin geändert: ${terminTitel(t)}`, body: t.aenderung ? `${terminWann(t)} – ${t.aenderung}` : terminWann(t), tag: 'termin-' + t.id }));
   const keys = [...new Set([...Object.keys(alt.fg), ...Object.keys(neu.fg)])].filter(k => !!alt.fg[k] !== !!neu.fg[k]);
   if (keys.length) msgs.push({ title: 'Damwild-Freigabe geändert', body: keys.map(k => `${fgItem(k)?.lbl || k}: ${neu.fg[k] ? 'frei' : 'nicht mehr frei'}`).join(' · '), tag: 'freigabe' });
   if (JSON.stringify(alt.sp) !== JSON.stringify(neu.sp)) {
@@ -2858,6 +2858,25 @@ const TERMIN_ARTEN = {
   gruenkohl: 'Grünkohlessen', leberessen: 'Leberessen', bockvertrinken: 'Bockvertrinken', hirschvertrinken: 'Hirschvertrinken', sonst: 'Sonstiges',
 };
 const terminTitel = t => t.titel || TERMIN_ARTEN[t.art] || 'Termin';
+/** Kurzer Text, was sich an einem Termin geändert hat (für Neuigkeiten und Benachrichtigung) */
+function terminAenderung(alt, neu) {
+  const f = [
+    ['Datum', t => t.datum ? dateDE(t.datum, true) : ''],
+    ['Uhrzeit', t => t.zeit ? `${t.zeit} Uhr` : ''],
+    ['Art', t => terminTitel(t)],
+    ['Treffpunkt', t => t.ort || ''],
+    ['Leitung', t => terminLeitung(t)],
+    ['Hinweis', t => t.besonderheit || ''],
+  ];
+  return f.map(([lbl, get]) => {
+    const a = get(alt), b = get(neu);
+    if (a === b) return '';
+    if (lbl === 'Hinweis') return b ? 'Hinweis geändert' : 'Hinweis entfernt';
+    if (!a) return `${lbl}: ${b}`;
+    if (!b) return `${lbl} entfällt`;
+    return `${lbl}: ${a} → ${b}`;
+  }).filter(Boolean).join(' · ');
+}
 const terminLeitung = t => t.leitungGruppe ? gruppeLabel(t.leitungGruppe).replace(/^\d+\.\s*/, '') : t.leitungId ? shooterName(t.leitungId) : (t.leitung || '');
 /* Bei Jagden heißt es „Jagdleitung“, bei allen anderen Terminen (Essen, Vertrinken, Versammlung …) „Organisation“ */
 const JAGD_ARTEN = ['jagdtag', 'treibjagd', 'venslage', 'drueckjagd'];
@@ -2942,7 +2961,11 @@ function openTermin(id) {
     // Für „Neuigkeiten“ auf der Startseite: wann eingetragen bzw. zuletzt geändert
     const jetzt = new Date().toISOString();
     rec.erstellt = ex?.erstellt || jetzt;
-    if (ex) { const { erstellt: e1, geaendert: g1, ...alt } = ex, { erstellt: e2, geaendert: g2, ...neu } = rec; if (JSON.stringify(alt) !== JSON.stringify(neu)) rec.geaendert = jetzt; else if (ex.geaendert) rec.geaendert = ex.geaendert; }
+    if (ex) {
+      const was = terminAenderung(ex, rec);
+      if (was) { rec.geaendert = jetzt; rec.aenderung = was; }
+      else { if (ex.geaendert) rec.geaendert = ex.geaendert; if (ex.aenderung) rec.aenderung = ex.aenderung; }
+    }
     state.data.termine = ex ? state.data.termine.map(x => x.id === ex.id ? rec : x) : [...state.data.termine, rec];
     closeSheet(); persist(`Termin: ${terminTitel(rec)} ${dateDE(datum)}`); renderTermine();
   });
@@ -3276,20 +3299,26 @@ function openInstallHilfeOrPrompt() {
 
 /* ---------- Neuigkeiten auf der Startseite ----------
    Die letzten Änderungen der vergangenen 14 Tage: erlegtes Damwild (mit Wildbret-Gruppe),
-   neue/geänderte Termine, Damwild-Freigabe. Niederwild und Rehwild bewusst nicht. */
+   Rehwild (erlegt/Fallwild), neue/geänderte Termine (mit Änderung), Damwild-Freigabe. Niederwild bewusst nicht. */
 const NEWS_TAGE = 14;
 const NEWS_ICO = {
   termin: '<svg viewBox="0 0 24 24"><rect x="4" y="5.5" width="16" height="14" rx="2.2"/><path d="M4 10h16M8.5 3.5v4M15.5 3.5v4"/></svg>',
   damm: '<svg viewBox="0 0 24 24"><path d="M12 21c-1.8 0-3-2.6-3-5.2 0-1.9 1.2-3.3 3-3.3s3 1.4 3 3.3C15 18.4 13.8 21 12 21z"/><path d="M9.6 13.2 6.5 10 4 10.5M6.5 10 5.6 6.6M6.5 10l-.3-3.6M14.4 13.2l3.1-3.2 2.5.5M17.5 10l.9-3.4M17.5 10l.3-3.6"/></svg>',
   frei: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="m8 12.3 2.7 2.7L16.2 9.4"/></svg>',
+  reh: '<svg viewBox="0 0 24 24"><path d="M12 21c-1.8 0-3-2.6-3-5.2 0-1.9 1.2-3.3 3-3.3s3 1.4 3 3.3C15 18.4 13.8 21 12 21z"/><path d="M10.4 12.7 9.3 8.5M9.3 8.5 7.6 6M9.3 8.5l.2-3.5M13.6 12.7l1.1-4.2M14.7 8.5 16.4 6M14.7 8.5l-.2-3.5"/></svg>',
 };
 function neuigkeiten() {
   const heute = todayISO(), ab = addDaysISO(heute, -NEWS_TAGE), items = [];
   const plan = state.schalen ? wildbretPlan() : null;
   if (plan) plan.list.filter(x => x.datum && x.datum >= ab && x.datum <= heute).forEach(x => items.push({
-    tag: x.datum, sort: x.datum + (x.zeit || ''), go: 'schalen', ico: 'damm',
+    tag: x.datum, sort: x.datum + (x.zeit || ''), go: 'schalen-damm', ico: 'damm',
     titel: `Damwild erlegt · ${katName('damm', x.kat)}`,
     text: `${dateDE(x.datum)} · Wildbret: ${gruppeLabel(plan.map[x.id] || 'keine')}`,
+  }));
+  (state.schalen?.eintraege || []).filter(x => x.art === 'reh' && x.datum && x.datum >= ab && x.datum <= heute).forEach(x => items.push({
+    tag: x.datum, sort: x.datum + (x.zeit || ''), go: 'schalen-reh', ico: 'reh',
+    titel: `Rehwild ${x.fallwild ? 'Fallwild' : 'erlegt'} · ${katName('reh', x.kat)}`,
+    text: `${dateDE(x.datum)}${x.fallwild ? '' : ` · erlegt von ${schuetzeText(x) || 'unbekannt'}`}`,
   }));
   (state.data.termine || []).filter(t => t.datum >= heute).forEach(t => {
     const neu = t.erstellt && t.erstellt.slice(0, 10) >= ab, geaendert = t.geaendert && t.geaendert.slice(0, 10) >= ab;
@@ -3297,14 +3326,14 @@ function neuigkeiten() {
     const wann = geaendert ? t.geaendert : t.erstellt;
     items.push({ tag: wann.slice(0, 10), sort: wann, go: 'termine', ico: 'termin',
       titel: `${geaendert ? 'Termin geändert' : 'Neuer Termin'} · ${terminTitel(t)}`,
-      text: `${dateDE(t.datum, true)}${t.zeit ? `, ${t.zeit} Uhr` : ''}` });
+      text: geaendert && t.aenderung ? t.aenderung : `${dateDE(t.datum, true)}${t.zeit ? `, ${t.zeit} Uhr` : ''}` });
   });
   const fgStand = state.data.damFreigabeStand;
   if (fgStand && fgStand >= ab && fgStand <= heute) {
     const frei = fgKats().filter(x => damStatus(x.k, heute).art === 'frei').map(x => x.lbl);
-    items.push({ tag: fgStand, sort: fgStand, go: 'schalen', ico: 'frei', titel: 'Damwild-Freigabe geändert', text: frei.length ? `Frei: ${frei.join(', ')}` : 'Zurzeit nichts frei' });
+    items.push({ tag: fgStand, sort: fgStand, go: 'schalen-damm', ico: 'frei', titel: 'Damwild-Freigabe geändert', text: frei.length ? `Frei: ${frei.join(', ')}` : 'Zurzeit nichts frei' });
   }
-  return items.sort((a, b) => b.sort.localeCompare(a.sort)).slice(0, 4);
+  return items.sort((a, b) => b.sort.localeCompare(a.sort)).slice(0, 5);
 }
 function newsKachel() {
   if (state.season !== seasonOf(todayISO())) return '';

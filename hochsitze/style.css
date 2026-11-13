@@ -385,6 +385,26 @@ legend { font: 600 15px var(--serif); color: var(--green); padding: 0 6px; }
 .sb-hint { margin-top: 3px; font-size: 10.5px; font-weight: 700; color: #ffcf8a; text-align: center; }
 .layer-name { top: 118px; }
 
+/* ---------- 1.12.0: mehrere Schießbereiche ---------- */
+.bx { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper-2); }
+.bx + .bx { margin-top: 10px; }
+.bx.active { border-color: var(--brass); box-shadow: 0 0 0 2px var(--brass-soft); }
+.bx .rose { width: 84px; height: 84px; }
+.bx-live { margin-top: 4px; min-height: 1em; font-weight: 600; color: var(--warn); }
+.bx-w button { min-height: 34px; padding: 4px 6px; font-size: 13px; }
+#bxAdd { margin-top: 10px; }
+
+/* ---------- 1.13.0: Namen aus, Umstellung offen, Kompass-Hinweise ---------- */
+.map.no-labels .hs-label { display: none !important; }
+.hs-pin.offen { box-shadow: 0 0 0 3px #ff8a00, 0 1px 4px rgba(0,0,0,.45); }
+.hs-pin.offen::before { content: '!'; position: absolute; left: -7px; top: -7px; width: 13px; height: 13px; border-radius: 50%; background: #ff8a00; color: #fff; font: 800 10px/13px var(--sans); text-align: center; border: 1.5px solid #fff; }
+.badge.umst { background: #ffe1bf; color: #8a4500; }
+.umst-box { padding: 10px 12px; border-radius: 12px; background: #fff1de; border: 1px solid #f0c48c; font-size: 13.5px; color: #5a3410; }
+.umst-box ul { list-style: none; margin: 6px 0 8px; padding: 0; }
+.umst-box li { color: #8a4500; }
+.umst-box li.ok { color: var(--green); }
+.bx-live .ok { color: var(--green); }
+
 /* 1.12.7 Salzlecke leer gemeldet */
 .hs-pin.lk.leer { box-shadow: 0 0 0 3px #b3261e, 0 1px 4px rgba(0,0,0,.45); }
 .hs-pin.lk.leer::before { content: '!'; position: absolute; left: -7px; top: -7px; width: 14px; height: 14px; border-radius: 50%; background: #b3261e; color: #fff; font: 700 10px/14px sans-serif; text-align: center; border: 1.5px solid #fff; }

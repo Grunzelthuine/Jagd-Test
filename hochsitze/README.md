@@ -8,7 +8,7 @@ Eigenständige Test-App (PWA), die später in die App „Jagd Thuine“ einflie�
 - Karte mit allen Hochsitzen: Luftbild (Esri), topografische Karte (BKG TopPlusOpen), OpenStreetMap. Symbol je Art, gelber Kegel = Blickrichtung, Ring gelb = Mängel, rot = gesperrt.
 - Erfassen am Sitz (nur voller Zugang): GPS wird laufend gemessen und gemittelt (Genauigkeit sichtbar), Punkt von Hand verschiebbar. Name, Art, Zustand, Bemerkung, Blickrichtung (Kompass oder antippen), Foto und Handy-Panorama.
 - Steht man beim Erfassen ≤ 30 m neben einem vorhandenen Sitz, fragt die App, ob dieser umgestellt wurde.
-- Umstellen: neue GPS-Position, Datum, optional neue Fotos/Richtung. Der alte Standort bleibt mit Zeitraum, Fotos und Panorama im Verlauf. Karte: Uhr-Knopf blendet alte Standorte (gestrichelt) ein.
+- Umstellen: neue GPS-Position, Datum, optional neue Fotos/Richtung. Der alte Standort bleibt mit Zeitraum, Fotos und Panorama im Verlauf. Alte Standorte erscheinen nur auf Wunsch über „Auf Karte“ im Verlauf (ab v1.13.2 kein eigener Kartenknopf mehr).
 - Liste mit Suche und Sortierung nach Name, Entfernung oder Art.
 - Offline: Änderungen ohne Netz landen in einer Warteschlange und werden automatisch hochgeladen. Angesehene Kartenkacheln und Fotos bleiben auf dem Gerät.
 
@@ -55,10 +55,27 @@ Eigenständige Test-App (PWA), die später in die App „Jagd Thuine“ einflie�
 - Sonnen-Kachel neu gestaltet: Sonne, ↑ Aufgang / ↓ Untergang und Fadenkreuz-Symbole für erstes (✓) / letztes (✕) Büchsenlicht, obere Zeile hell, untere dunkel.
 - Büchsenlicht fest = bürgerliche Dämmerung (Sonne 6° unter dem Horizont); Auswahl entfällt.
 
+## Neu in v1.12.0
+- **Bis zu 3 Schießbereiche je Hochsitz** (z. B. vorn auf den Graben, nach links und rechts) – jeder als eigener Kegel am Symbol, mit eigener Fächerbreite (30–180°).
+- **Fächer messen** mit dem Handy: Oberkante auf den linken Rand des Bereichs richten → tippen, auf den rechten Rand richten → tippen; die App setzt Mitte und Breite. Alternativ „Nur Richtung messen“ oder Richtung/Breite antippen.
+- Wind-Bewertung je Bereich („Bereich SW: von vorn, günstig“ …). Ältere Sitze mit einer Blickrichtung werden als ein Bereich mit 60° übernommen.
+
+## Neu in v1.13.0
+- **Fotos zuverlässiger:** Auswahl hängt im Dokument (iOS verlor sonst manchmal die Auswahl), kein Kamera-Zwang mehr – das iPhone bietet „Foto aufnehmen“, „Mediathek“ oder „Datei“.
+- **Kompass beim Messen:** Hinweise „Handy flacher halten“, „Kompass ungenau – in Form einer 8 schwenken“, „✓ ruhig – jetzt tippen“; übernommen wird der Mittelwert der letzten 0,8 s; schräg gehaltenes Handy wird abgelehnt.
+- **Namen ein/aus:** Knopf „T“ rechts blendet die Hochsitz-Namen auf der Karte aus (gemerkt).
+- **Umstellen neu:** Fotos und Schießbereiche des alten Standorts wandern in den Verlauf, am neuen Standort wird neu erfasst (sofort oder später). Freifläche und Kirrung bleiben. Bis „Umstellung abschließen“ (Detail oder Häkchen beim Bearbeiten) ist der Sitz orange markiert (Karte „!“, Liste „Umstellung offen“).
+
+## Neu in v1.13.1
+- Eigener Kartenknopf für die **Witterungsfahnen** (Punkt mit gestricheltem Kegel, über dem Wind-Knopf); grün = an. Das Häkchen im Wind-Fenster bleibt und ist synchron.
+
+## Neu in v1.13.2
+- Kartenknopf „Alte Standorte“ entfernt (umgesetzte Sitze kommen in der Regel nicht an den alten Platz zurück). Im Hochsitz-Verlauf zeigt „Auf Karte“ den alten Standort kurz mit gestrichelter Linie; Tipp in die Karte blendet ihn aus.
+
 ## Daten
 - `data/hochsitze.json`: verschlüsselt (AES-GCM, PBKDF2-SHA256 150.000), gleiches Format wie `strecke.json` in Jagd Thuine.
 - `data/fotos/*.bin`: verschlüsselte JPEGs (Format „SBE1“ wie die Dokumente in Jagd Thuine), jeweils mit Vorschaubild `-t.bin`.
-- Modell: `sitze: [{id, name, art (kanzel|leiter|drueckjagd|erdsitz|sonst), zustand (gut|maengel|gesperrt), bemerkung, lat, lng, acc, richtung (Grad|null), foto {f,t,w,h}, pano {f,t,w,h}, seit, erstellt, geaendert, verlauf: [{lat, lng, acc, richtung, von, bis, foto, pano}], flaeche: {pts: [[lat,lng]…], m2, datum} | null, kirrung: {lat, lng, datum} | null}]`.
+- Modell: `sitze: [{id, name, art (kanzel|leiter|drueckjagd|erdsitz|sonst), zustand (gut|maengel|gesperrt), bemerkung, lat, lng, acc, richtung (Grad|null, = erster Bereich), bereiche: [{r: Grad, b: Fächerbreite}] (max. 3), umstellung: {seit} | fehlt, foto {f,t,w,h}, pano {f,t,w,h}, seit, erstellt, geaendert, verlauf: [{lat, lng, acc, richtung, von, bis, foto, pano}], flaeche: {pts: [[lat,lng]…], m2, datum} | null, kirrung: {lat, lng, datum} | null}]`.
 - `lecken: [{id, name, bemerkung, lat, lng, acc, foto, erstellt, geaendert, wartung: [{id, datum, art (bestueckt|kontrolliert|repariert), notiz, zeit}]}]`.
 
 ## Zugang

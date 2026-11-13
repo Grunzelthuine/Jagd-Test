@@ -4,7 +4,7 @@
  */
 importScripts('config.js');
 const PRE = (self.JAGD_CFG || {}).lsPrefix || '';   // Test-Umgebung: eigene Cache-Namen
-const VERSION = PRE + 'hs-1.12.8';
+const VERSION = PRE + 'hs-1.14.0';
 const TILES = 'hs-tiles-v1';
 const TILE_MAX = 3000;
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'config.js', 'konto.js', 'manifest.webmanifest',

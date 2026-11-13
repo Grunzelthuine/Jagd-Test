@@ -41,9 +41,10 @@ const CONFIG = {
       rechte: {
         zustand: 'Hochsitz-Zustand ändern (Mängel, gesperrt)',
         lecke: 'Salzlecken abhaken (bestückt, kontrolliert)',
+        leer: 'Salzlecke als leer melden',
       },
       regeln: [
-        { repo: 'Jagd-Test', pfad: 'hochsitze/data/hochsitze.json', write: ['zustand', 'lecke'] },
+        { repo: 'Jagd-Test', pfad: 'hochsitze/data/hochsitze.json', write: ['zustand', 'lecke', 'leer'] },
         { repo: 'Jagd-Test', pfad: 'hochsitze/', write: 'admin' },
       ],
     },

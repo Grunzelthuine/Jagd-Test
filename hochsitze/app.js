@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.12.6';
+const APP_VERSION = '1.12.7';
 /* Einstellungen je Installation (config.js): Konten-Server, Test-Umgebung */
 const CONF = self.JAGD_CFG || {};
 const LSP = CONF.lsPrefix || '';
@@ -30,7 +30,7 @@ const ARTEN = {
 };
 const LECKE = { name: 'Salzlecke', color: '#3c6e8f', icon: '<path d="M6.5 6.5h11v6h-11Z"/><path d="M12 12.5V21M9 21h6"/>' };
 const KIRR_ICON = '<circle cx="12" cy="12" r="6.5"/><circle cx="10" cy="10.5" r="1" fill="currentColor"/><circle cx="14" cy="11" r="1" fill="currentColor"/><circle cx="11.5" cy="14" r="1" fill="currentColor"/>';
-const WARTUNG = { bestueckt: 'Bestückt', kontrolliert: 'Kontrolliert', repariert: 'Repariert' };
+const WARTUNG = { bestueckt: 'Bestückt', kontrolliert: 'Kontrolliert', repariert: 'Repariert', leer: 'Leer gemeldet' };
 const ZUSTAND = { gut: 'In Ordnung', maengel: 'Mängel', gesperrt: 'Gesperrt' };
 const DIRS = ['N', 'NO', 'O', 'SO', 'S', 'SW', 'W', 'NW'];
 const LAYERS = {
@@ -189,7 +189,8 @@ const isAdmin = () => tokenAdmin() || !!(window.Konto?.isAdmin() && state.cfg.ow
 /** Einzelrechte (vom Admin je Person freigegeben) */
 const canZustand = () => isAdmin() || !!window.Konto?.can('zustand');
 const canLecke = () => isAdmin() || !!window.Konto?.can('lecke');
-const canWrite = () => isAdmin() || canZustand() || canLecke();
+const canLeerMelden = () => canLecke() || !!window.Konto?.can('leer');
+const canWrite = () => isAdmin() || canZustand() || canLecke() || canLeerMelden();
 const saveCfg = () => lsSet(LS_CFG, state.cfg);
 const saveView = () => lsSet(LS_VIEW, state.view);
 const sitzById = id => state.data.sitze.find(s => s.id === id);
@@ -585,7 +586,7 @@ function renderMap() {
     }
   }
   for (const l of state.data.lecken) {
-    const m = L.marker([l.lat, l.lng], { icon: leckeIcon(pend.has(l.id)), title: l.name });
+    const m = L.marker([l.lat, l.lng], { icon: leckeIcon(pend.has(l.id), !!leerGemeldet(l)), title: leerGemeldet(l) ? `${l.name} – leer gemeldet` : l.name });
     m.bindTooltip(esc(l.name), { permanent: true, direction: 'bottom', className: 'hs-label', offset: [0, 4] });
     m.on('click', e => pick(e, () => openLecke(l.id), l.name));
     sitzLayer.addLayer(m);
@@ -1880,10 +1881,12 @@ function daysSince(iso) {
 const sinceTxt = iso => { const n = daysSince(iso); return n == null ? '' : n <= 0 ? 'heute' : n === 1 ? 'gestern' : `vor ${n} Tagen`; };
 const sortWartung = l => l.wartung.slice().sort((a, b) => (b.datum || '').localeCompare(a.datum || '') || (b.zeit || '').localeCompare(a.zeit || ''));
 const lastOf = (l, art) => sortWartung(l).find(w => !art || w.art === art) || null;
+/** Als leer gemeldet und seitdem nicht wieder bestückt? (Leer-Meldung ist der neueste Eintrag) */
+const leerGemeldet = l => { const w = lastOf(l); return w && w.art === 'leer' ? w : null; };
 
-function leckeIcon(pending) {
+function leckeIcon(pending, leer = false) {
   return L.divIcon({ className: 'hs-ico', iconSize: [46, 46], iconAnchor: [23, 23], tooltipAnchor: [0, 16],
-    html: `<div class="hs-wrap"><div class="hs-pin lk${pending ? ' pending' : ''}" style="background:${LECKE.color}">${svgIcon(LECKE.icon)}</div></div>` });
+    html: `<div class="hs-wrap"><div class="hs-pin lk${pending ? ' pending' : ''}${leer ? ' leer' : ''}" style="background:${LECKE.color}">${svgIcon(LECKE.icon)}</div></div>` });
 }
 function kirrIcon() {
   return L.divIcon({ className: 'hs-ico', iconSize: [30, 30], iconAnchor: [15, 15], tooltipAnchor: [0, -10],
@@ -1918,15 +1921,19 @@ function renderLeckenList(el) {
   const lb = l => lastOf(l, 'bestueckt')?.datum || '';
   if (sort === 'name') { /* schon nach Name */ }
   else if (sort === 'dist' && state.me) rows = rows.slice().sort((a, b) => distM(state.me, a) - distM(state.me, b));
-  else rows = rows.slice().sort((a, b) => lb(a).localeCompare(lb(b)) || a.name.localeCompare(b.name, 'de', { numeric: true }));
+  else rows = rows.slice().sort((a, b) => (leerGemeldet(b) ? 1 : 0) - (leerGemeldet(a) ? 1 : 0) || lb(a).localeCompare(lb(b)) || a.name.localeCompare(b.name, 'de', { numeric: true }));
   const nie = lk.filter(l => !lastOf(l, 'bestueckt')).length;
+  const leer = lk.filter(l => leerGemeldet(l)).length;
   el.innerHTML = `${listSeg()}
     <div class="card pad">
       <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px">
         <div><div style="font:600 30px/1 var(--serif);color:var(--green)">${lk.length}</div><div class="sub">${lk.length === 1 ? 'Salzlecke' : 'Salzlecken'} im Revier</div></div>
-        ${nie ? `<span class="badge maengel">${nie} noch nie bestückt</span>` : ''}
+        <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">
+          ${leer ? `<span class="badge gesperrt">${leer} leer gemeldet</span>` : ''}
+          ${nie ? `<span class="badge maengel">${nie} noch nie bestückt</span>` : ''}
+        </div>
       </div>
-      ${canLecke() && lk.length ? '<p class="hint" style="margin-top:8px">Mit ✓ hakst du eine Lecke als bestückt ab. Antippen öffnet das Wartungsbuch.</p>' : ''}
+      ${canLecke() && lk.length ? '<p class="hint" style="margin-top:8px">Mit ✓ hakst du eine Lecke als bestückt ab. Antippen öffnet das Wartungsbuch.</p>' : canLeerMelden() && lk.length ? '<p class="hint" style="margin-top:8px">Ist eine Lecke leer? Antippen → „Leer melden“.</p>' : ''}
     </div>
     ${lk.length ? `<div class="list-tools">
       <input type="search" id="listQ" placeholder="Suchen …" value="${esc(state.listQ || '')}" aria-label="Suchen">
@@ -1937,13 +1944,13 @@ function renderLeckenList(el) {
       </select>
     </div>` : ''}
     <div id="leckList">${rows.map(l => {
-      const b = lastOf(l, 'bestueckt'), w = lastOf(l);
+      const b = lastOf(l, 'bestueckt'), w = lastOf(l), lg = leerGemeldet(l);
       return `<div class="lk-row">
         <button class="sitz" data-lid="${esc(l.id)}">
           <div class="th" ${l.foto ? `data-img="${esc(l.foto.t)}"` : `style="background:${LECKE.color}"`}>${l.foto ? '' : svgIcon(LECKE.icon)}</div>
           <div style="min-width:0"><div class="nm">${esc(l.name)}</div>
             <div class="mt">${b ? `Bestückt ${dateDE(b.datum)} · <b>${sinceTxt(b.datum)}</b>` : '<b style="color:var(--warn)">noch nicht bestückt</b>'}</div>
-            ${w && w !== b ? `<div class="mt">${WARTUNG[w.art] || w.art} ${dateDE(w.datum)}</div>` : ''}
+            ${lg ? `<div class="mt"><b style="color:var(--warn)">⚠ Leer gemeldet ${dateDE(lg.datum)}</b></div>` : w && w !== b ? `<div class="mt">${WARTUNG[w.art] || w.art} ${dateDE(w.datum)}</div>` : ''}
             ${pend.has(l.id) ? '<div style="margin-top:5px"><span class="badge wait">nicht hochgeladen</span></div>' : ''}
           </div>
           <div class="ds" data-dist="${esc(l.id)}"></div>
@@ -1967,12 +1974,13 @@ function renderLeckenList(el) {
 function openLecke(id) {
   const l = leckeById(id); if (!l) return;
   const pend = pendingIds().has(id);
-  const b = lastOf(l, 'bestueckt');
+  const b = lastOf(l, 'bestueckt'), lg = leerGemeldet(l);
   const log = sortWartung(l);
   openSheet(l.name, `
     ${l.foto ? `<div class="det-photo"><img data-img="${esc(l.foto.t)}" alt="Foto ${esc(l.name)}" id="lkFoto"></div>` : ''}
     <div style="display:flex;gap:6px;flex-wrap:wrap"><span class="badge" style="background:${LECKE.color};color:#fff">Salzlecke</span>${pend ? '<span class="badge wait">noch nicht hochgeladen</span>' : ''}</div>
-    <div class="card pad lk-status">${b ? `<div class="sub">Zuletzt bestückt</div><div class="big">${dateDE(b.datum)}</div><div class="sub">${sinceTxt(b.datum)}</div>` : '<div class="big" style="color:var(--warn)">Noch nicht bestückt</div>'}</div>
+    <div class="card pad lk-status">${b ? `<div class="sub">Zuletzt bestückt</div><div class="big">${dateDE(b.datum)}</div><div class="sub">${sinceTxt(b.datum)}</div>` : '<div class="big" style="color:var(--warn)">Noch nicht bestückt</div>'}
+      ${lg ? `<div class="lk-leer">⚠ Leer gemeldet ${dateDE(lg.datum)}${lg.notiz ? ` – ${esc(lg.notiz)}` : ''}</div>` : ''}</div>
     ${l.bemerkung ? `<div class="note">${esc(l.bemerkung)}</div>` : ''}
     <dl class="facts">
       ${state.me ? `<dt>Entfernung</dt><dd>${distM(state.me, l) <= Math.max(10, state.me.acc || 0) ? 'Du bist an der Lecke' : `${distTxt(distM(state.me, l))} Richtung ${dirName(bearing(state.me, l))}`}</dd>` : ''}
@@ -1982,9 +1990,9 @@ function openLecke(id) {
     <h2 class="section">Wartungsbuch</h2>
     ${log.length ? `<div class="card pad"><ul class="hist">${log.map(w => `<li><i class="w-${esc(w.art)}"></i><div><b>${WARTUNG[w.art] || esc(w.art)}</b> · ${dateDE(w.datum)}${w.notiz ? `<small>${esc(w.notiz)}</small>` : ''}
       ${isAdmin() ? `<div><button class="btn ghost small" data-wdel="${esc(w.id)}" style="color:var(--warn);min-height:30px;padding:2px 0;margin-top:2px">Entfernen</button></div>` : ''}</div></li>`).join('')}</ul></div>` : '<p class="hint">Noch keine Einträge.</p>'}
-    ${canLecke() ? `<div class="btn-row"><button class="btn secondary small" id="lkKontr">Kontrolliert</button><button class="btn secondary small" id="lkRep">Repariert</button>${isAdmin() ? '<button class="btn secondary small" id="lkEdit">Bearbeiten</button>' : ''}</div>` : ''}
+    ${canLecke() ? `<div class="btn-row"><button class="btn secondary small" id="lkKontr">Kontrolliert</button><button class="btn secondary small" id="lkRep">Repariert</button>${lg ? '' : '<button class="btn secondary small" id="lkLeer">Leer melden</button>'}${isAdmin() ? '<button class="btn secondary small" id="lkEdit">Bearbeiten</button>' : ''}</div>` : ''}
     ${isAdmin() ? '<button class="btn danger block" id="lkDel" style="margin-top:18px">Salzlecke löschen</button>' : ''}`,
-    canLecke() ? `<button class="btn" id="lkBest">✓ Bestückt</button>` : '');
+    canLecke() ? `<button class="btn" id="lkBest">✓ Bestückt</button>` : canLeerMelden() && !lg ? '<button class="btn" id="lkLeer">Leer melden</button>' : '');
   const root = $('#sheet');
   hydrateImages(root);
   $('#lkFoto')?.addEventListener('click', () => openViewer(l.foto.f, l.name));
@@ -1993,6 +2001,7 @@ function openLecke(id) {
   $('#lkBest')?.addEventListener('click', () => openWartung(id, 'bestueckt'));
   $('#lkKontr')?.addEventListener('click', () => openWartung(id, 'kontrolliert'));
   $('#lkRep')?.addEventListener('click', () => openWartung(id, 'repariert'));
+  $('#lkLeer')?.addEventListener('click', () => openWartung(id, 'leer'));
   $('#lkEdit')?.addEventListener('click', () => openLeckeCapture('bearbeiten', id));
   $$('[data-wdel]', root).forEach(btn => btn.onclick = () => {
     if (!btn.dataset.sure) { btn.dataset.sure = 1; btn.textContent = 'Wirklich entfernen?'; return; }
@@ -2009,14 +2018,18 @@ function openLecke(id) {
 }
 /** Wartung eintragen (Standard: heute, Bestückt) */
 function openWartung(id, art = 'bestueckt') {
-  const l = leckeById(id); if (!l || !canLecke()) return;
+  const l = leckeById(id); if (!l) return;
+  const nurLeer = !canLecke();
+  if (nurLeer && (!canLeerMelden() || art !== 'leer')) return;
   if (!state.pw) { openPwSheet(() => openWartung(id, art)); return; }
   let a = art;
+  const arten = nurLeer ? { leer: WARTUNG.leer } : WARTUNG;
   openSheet(l.name, `
-    <div class="field"><span>Was wurde gemacht?</span><div class="seg" id="wArt">${Object.entries(WARTUNG).map(([k, t]) => `<button type="button" data-v="${k}" class="${k === a ? 'on' : ''}">${t}</button>`).join('')}</div></div>
+    ${nurLeer ? '<p class="hint" style="margin-top:0">Die Lecke ist leer und sollte bestückt werden? Dann hier melden – Sebastian sieht es in der Liste und auf der Karte.</p>'
+      : `<div class="field"><span>Was wurde gemacht?</span><div class="seg" id="wArt">${Object.entries(arten).map(([k, t]) => `<button type="button" data-v="${k}" class="${k === a ? 'on' : ''}">${k === 'leer' ? 'Leer' : t}</button>`).join('')}</div></div>`}
     <label class="field"><span>Datum</span><input type="date" id="wDatum" value="${todayISO()}"></label>
-    <label class="field"><span>Notiz (optional)</span><input id="wNotiz" placeholder="z. B. neuer Stein, Pfahl erneuert" autocomplete="off"></label>`,
-    `<button class="btn secondary" data-close>Abbrechen</button><button class="btn" id="wSave">Abhaken</button>`);
+    <label class="field"><span>Notiz (optional)</span><input id="wNotiz" placeholder="${nurLeer ? 'z. B. Stein ganz weg, nur noch Reste' : 'z. B. neuer Stein, Pfahl erneuert'}" autocomplete="off"></label>`,
+    `<button class="btn secondary" data-close>Abbrechen</button><button class="btn" id="wSave">${nurLeer ? 'Leer melden' : 'Abhaken'}</button>`);
   $$('#wArt button').forEach(b => b.onclick = () => { a = b.dataset.v; $$('#wArt button').forEach(x => x.classList.toggle('on', x === b)); });
   $('#wSave').onclick = () => {
     const datum = $('#wDatum').value || todayISO();

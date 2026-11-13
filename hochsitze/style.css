@@ -384,3 +384,9 @@ legend { font: 600 15px var(--serif); color: var(--green); padding: 0 6px; }
 .sb-t.dn { background: #26251f; color: #fff; }
 .sb-hint { margin-top: 3px; font-size: 10.5px; font-weight: 700; color: #ffcf8a; text-align: center; }
 .layer-name { top: 118px; }
+
+/* 1.12.7 Salzlecke leer gemeldet */
+.hs-pin.lk.leer { box-shadow: 0 0 0 3px #b3261e, 0 1px 4px rgba(0,0,0,.45); }
+.hs-pin.lk.leer::before { content: '!'; position: absolute; left: -7px; top: -7px; width: 14px; height: 14px; border-radius: 50%; background: #b3261e; color: #fff; font: 700 10px/14px sans-serif; text-align: center; border: 1.5px solid #fff; }
+.lk-leer { margin-top: 8px; padding: 6px 10px; border-radius: 10px; background: var(--warn-soft, #f6dcd6); color: var(--warn); font-weight: 600; font-size: 14px; }
+.hist li i.w-leer { background: #b3261e; border-color: #b3261e; }

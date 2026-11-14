@@ -115,6 +115,8 @@ window.Konto = (() => {
 .kt-chk{display:flex;gap:10px;align-items:flex-start;margin-top:8px;font-size:14.5px}
 .kt-chk input{width:20px;height:20px;margin-top:1px;accent-color:var(--green);flex:none}
 .kt-sub{margin-top:10px;font-size:13px;font-weight:600;color:var(--muted)}
+.kt-2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.kt-krit{list-style:none;margin:6px 0 6px;padding:0;font-size:13.5px;color:var(--muted)}.kt-krit li.ok{color:var(--green);font-weight:600}
 .kt-msg{min-height:1.2em;color:var(--warn);font-size:14px;margin:0}
 .kt-log{list-style:none;margin:0;padding:0;font-size:13.5px}
 .kt-log li{padding:7px 0;border-top:1px solid var(--line)}.kt-log li:first-child{border-top:0}
@@ -135,29 +137,39 @@ window.Konto = (() => {
     try { await info(); } catch { /* offline – trotzdem anzeigen */ }
     const erster = !!inf?.ersterNutzer;
     if (erster) mode = 'neu';
+    const kriterien = () => {
+      const a = $('#ktPw')?.value || '', b = $('#ktPw2')?.value || '';
+      const li = (ok, t) => `<li class="${ok ? 'ok' : ''}">${ok ? '✓' : '○'} ${t}</li>`;
+      const box = $('#ktKrit'); if (box) box.innerHTML = li(a.length >= 6, 'mindestens 6 Zeichen') + li(a && a === b, 'beide Eingaben gleich');
+    };
     const draw = () => {
       const neu = mode === 'neu';
       sheet(neu ? 'Konto beantragen' : 'Mit Konto anmelden', `
         ${neu ? `<p class="hint">${erster ? '<b>Du bist der Erste.</b> Dein Konto wird automatisch Haupt-Admin und ist sofort aktiv.' : 'Nach dem Beantragen gibt Sebastian (bzw. ein Admin) dein Konto frei. Danach kannst du dich hier anmelden.'}</p>`
-        : '<p class="hint">Mit deinem Konto brauchst du kein gemeinsames Passwort und keinen Token. Noch kein Konto? Unten „Konto beantragen“.</p>'}
-        <label class="field"><span>Vor- und Nachname</span><input id="ktName" autocomplete="username" autocapitalize="words" placeholder="z. B. Werner Gebbe"></label>
-        <label class="field"><span>${neu ? 'Passwort wählen (mind. 6 Zeichen)' : 'Passwort'}</span><input type="password" id="ktPw" autocomplete="${neu ? 'new-password' : 'current-password'}"></label>
-        ${neu ? '<label class="field"><span>Passwort wiederholen</span><input type="password" id="ktPw2" autocomplete="new-password"></label>' : ''}
+        : '<p class="hint">Melde dich mit deinem Vor- und Nachnamen und deinem Passwort an. Noch kein Konto? Unten „Konto beantragen“.</p>'}
+        <div class="kt-2"><label class="field"><span>Vorname</span><input id="ktVor" autocomplete="given-name" autocapitalize="words" placeholder="z. B. Werner"></label>
+        <label class="field"><span>Nachname</span><input id="ktNach" autocomplete="family-name" autocapitalize="words" placeholder="z. B. Gebbe"></label></div>
+        <label class="field"><span>${neu ? 'Passwort wählen' : 'Passwort'}</span><input type="password" id="ktPw" autocomplete="${neu ? 'new-password' : 'current-password'}"></label>
+        ${neu ? '<label class="field"><span>Passwort wiederholen</span><input type="password" id="ktPw2" autocomplete="new-password"></label><ul class="kt-krit" id="ktKrit"></ul>' : ''}
         <p class="kt-msg" id="ktMsg"></p>
+        ${neu ? '' : '<button type="button" class="btn ghost block" id="ktVergessen">Passwort vergessen?</button>'}
         ${erster ? '' : `<button type="button" class="btn ghost block" id="ktSwitch">${neu ? 'Ich habe schon ein Konto – anmelden' : 'Noch kein Konto? Konto beantragen'}</button>`}`,
         `<button class="btn secondary" data-close>Abbrechen</button><button class="btn" id="ktGo">${neu ? 'Beantragen' : 'Anmelden'}</button>`, over);
       $('#ktSwitch')?.addEventListener('click', () => { mode = neu ? 'login' : 'neu'; draw(); });
+      $('#ktVergessen')?.addEventListener('click', () => openVergessen({ over, vor: $('#ktVor').value, nach: $('#ktNach').value }));
+      if (neu) { kriterien(); $$('#ktPw, #ktPw2').forEach(i => i.addEventListener('input', kriterien)); }
       const go = async () => {
         const msg = t => { $('#ktMsg').textContent = t; };
-        const name = $('#ktName').value.trim(), pw = $('#ktPw').value;
-        if (name.split(/\s+/).length < 2) return msg('Bitte Vor- und Nachnamen eintragen.');
+        const vor = $('#ktVor').value.trim(), nach = $('#ktNach').value.trim(), pw = $('#ktPw').value;
+        if (!vor || !nach) return msg('Bitte Vor- und Nachnamen eintragen.');
+        const name = `${vor} ${nach}`;
         if (!pw) return msg('Bitte das Passwort eingeben.');
         if (neu) { if (pw.length < 6) return msg('Das Passwort braucht mindestens 6 Zeichen.'); if (pw !== $('#ktPw2').value) return msg('Die beiden Passwörter sind verschieden.'); }
         const b = $('#ktGo'); b.disabled = true; msg('');
         try {
           const j = await api('POST', neu ? '/konto/registrieren' : '/konto/anmelden', { name, pw }, { auth: false });
           if (j.wartend) {
-            sheet('Konto beantragt', `<p>Danke, <b>${esc(j.user.name)}</b>! Dein Konto ist beantragt.</p><p class="hint">Sobald Sebastian es freigegeben hat, meldest du dich mit Namen und Passwort an (Einstellungen → Konto).</p>`, '<button class="btn" data-close>OK</button>', over);
+            sheet('Konto beantragt', `<p>Danke, <b>${esc(j.user.name)}</b>! Dein Konto ist beantragt.</p><p class="hint">Sebastian wurde benachrichtigt. Sobald er dein Konto freigegeben hat, meldest du dich hier mit Namen und Passwort an.</p>`, '<button class="btn" data-close>OK</button>', over);
             return;
           }
           uebernehmen(j); inf && (inf.ersterNutzer = false, sv(LSI, inf));
@@ -166,13 +178,42 @@ window.Konto = (() => {
           await nachAnmeldung();
           if (!dataPw() && hatZugang()) toast(isAdmin() ? 'Bitte einmal das Passwort der Jagdgemeinschaft eingeben – es wird dann im Server hinterlegt.' : 'Für dein Konto ist noch kein Daten-Passwort hinterlegt – bitte Sebastian Bescheid geben.', 6000);
           onDone?.(j);
+          setTimeout(() => pushFrage(), 700);
         } catch (e) { msg(e.message); b.disabled = false; }
       };
       $('#ktGo').addEventListener('click', go);
-      $$('#ktName, #ktPw, #ktPw2').forEach(i => i.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); go(); } }));
-      setTimeout(() => $('#ktName')?.focus(), 60);
+      $$('#ktVor, #ktNach, #ktPw, #ktPw2').forEach(i => i.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); go(); } }));
+      setTimeout(() => $('#ktVor')?.focus(), 60);
     };
     draw();
+  }
+  /** Passwort vergessen: Admins werden benachrichtigt und setzen ein Startpasswort */
+  function openVergessen({ over = false, vor = '', nach = '' } = {}) {
+    sheet('Passwort vergessen', `
+      <p class="hint">Trag deinen Namen ein. Sebastian bekommt eine Nachricht und gibt dir ein neues Startpasswort, das du danach selbst ändern kannst.</p>
+      <div class="kt-2"><label class="field"><span>Vorname</span><input id="kvVor" autocapitalize="words" value="${esc(vor)}"></label>
+      <label class="field"><span>Nachname</span><input id="kvNach" autocapitalize="words" value="${esc(nach)}"></label></div>
+      <p class="kt-msg" id="kvMsg"></p>`,
+      '<button class="btn secondary" id="kvBack">Zurück</button><button class="btn" id="kvGo">Bescheid geben</button>', over);
+    $('#kvBack').addEventListener('click', () => openLogin({ over }));
+    $('#kvGo').addEventListener('click', async e => {
+      const v = $('#kvVor').value.trim(), n = $('#kvNach').value.trim();
+      if (!v || !n) { $('#kvMsg').textContent = 'Bitte Vor- und Nachnamen eintragen.'; return; }
+      e.currentTarget.disabled = true;
+      try { await api('POST', '/konto/passwort-vergessen', { name: `${v} ${n}` }, { auth: false }); } catch { /* Antwort immer gleich */ }
+      sheet('Passwort vergessen', '<p>Danke! <b>Sebastian wurde benachrichtigt</b> und meldet sich mit einem neuen Startpasswort bei dir.</p>', '<button class="btn" data-close>OK</button>', over);
+    });
+  }
+  /** Nach der Anmeldung einmal anbieten, Benachrichtigungen einzuschalten */
+  async function pushFrage() {
+    if (!CFG.push || !loggedIn() || !hatZugang() || !pushSupported() || Notification.permission === 'denied') return;
+    if (Notification.permission === 'granted' && await Promise.race([currentSub(), new Promise(r => setTimeout(() => r(null), 2000))])) return;
+    sheet('Benachrichtigungen einschalten?', `<p>${esc(pushText(false))}</p><p class="hint">Du kannst das jederzeit unter Einstellungen → Konto wieder ausschalten.</p>`,
+      '<button class="btn secondary" data-close>Später</button><button class="btn" id="kpOn">🔔 Einschalten</button>');
+    $('#kpOn').addEventListener('click', async e => {
+      e.currentTarget.disabled = true;
+      try { await pushEnable(); close(); toast('Benachrichtigungen an ✓'); } catch (err) { close(); toast(err.message, 5000); }
+    });
   }
 
   /** Abschnitt für die Einstellungen der App */
@@ -233,7 +274,7 @@ window.Konto = (() => {
       return `${esc(appName(a))}: ${rolleTxt(v.rolle)}${rr.length && v.rolle !== 'admin' ? ' + ' + esc(rr.join(', ')) : ''}${(v.hinweise || []).length ? ' 🔔' : ''}`;
     }).join(' · ');
     const row = x => `<li><button class="kt-row" data-ktu="${esc(x.id)}"><span class="kt-ava" style="width:32px;height:32px;font-size:13px${x.status === 'gesperrt' ? ';background:var(--muted)' : ''}">${esc(initials(x.name))}</span>
-        <span class="kt-n"><b>${esc(x.name)} ${x.super ? '<span class="kt-tag">Haupt-Admin</span>' : x.status === 'gesperrt' ? '<span class="kt-tag x">gesperrt</span>' : ''}</b><small>${x.super ? 'alle Rechte' : appsTxt(x)}</small></span></button>
+        <span class="kt-n"><b>${esc(x.name)} ${x.super ? '<span class="kt-tag">Haupt-Admin</span>' : x.status === 'gesperrt' ? '<span class="kt-tag x">gesperrt</span>' : ''}${x.pwVergessen ? ' <span class="kt-tag w">Passwort vergessen</span>' : ''}</b><small>${x.super ? 'alle Rechte' : appsTxt(x)}</small></span></button>
         ${x.status === 'wartend' ? `<button class="btn" style="min-height:36px;padding:4px 12px" data-ktok="${esc(x.id)}">Freigeben</button>` : ''}</li>`;
     const me = user();
     sheet('Konten verwalten', `
@@ -289,7 +330,7 @@ window.Konto = (() => {
             ${v.rolle !== 'kein' ? hinwHtml : ''}
             ${darf ? '' : '<p class="hint" style="margin:6px 0 0">Nur ein Admin dieser App kann das ändern.</p>'}</div>`;
         }).join('')}
-        ${!neu && !x.super ? `<details class="kt-box"><summary style="cursor:pointer;font-weight:600">Passwort vergessen? Neues Startpasswort</summary>
+        ${!neu && !x.super ? `<details class="kt-box" ${x.pwVergessen ? 'open' : ''}><summary style="cursor:pointer;font-weight:600">Passwort vergessen? Neues Startpasswort</summary>
             <label class="field" style="margin-top:8px"><span>Neues Passwort</span><input id="kuNeuPw" autocomplete="off" autocapitalize="off" value="${esc(vorschlagPw())}"></label>
             <button type="button" class="btn secondary block" id="kuSetPw" style="margin-top:8px">Passwort setzen</button>
             <p class="hint">Das Passwort dem Jäger persönlich weitergeben. Er kann es danach unter Einstellungen → Konto ändern.</p></details>` : ''}
@@ -441,11 +482,20 @@ window.Konto = (() => {
       if (st.token && Date.now() - (init._r || 0) > 10 * 60e3) { init._r = Date.now(); refresh(); }
     });
   }
-  const nurKonten = () => !!inf?.nurKonten;
+  const nurKonten = () => !!(inf?.nurKonten || CFG.nurKonto);
   /** Foto-Auswertung über den Server (Schlüssel bleibt dort) */
   const kiServer = () => !!(inf?.ki && isAdmin());
   const ki = (bild, text, signal) => api('POST', '/ki/erlegerliste', { bild, text }, { signal });
+  /** Beim App-Start: wer angemeldet ist und noch keine Benachrichtigungen hat, wird gefragt (bei „Später“ erst nach 7 Tagen wieder) */
+  const LSF = (CFG.lsPrefix || '') + 'konto.pushfrage.v1';
+  function pushFrageStart() {
+    if (!CFG.push || !loggedIn()) return;
+    let t = 0; try { t = +localStorage.getItem(LSF) || 0; } catch {}
+    if (Date.now() - t < 7 * 864e5) return;
+    try { localStorage.setItem(LSF, String(Date.now())); } catch {}
+    setTimeout(() => { if (!document.querySelector('#sheet:not([hidden]), dialog[open]')) pushFrage(); }, 1500);
+  }
 
   return { init, enabled, loggedIn, user, rolle, isAdmin, isAnyAdmin, hatZugang, can, token, ghBase, dataPw, refresh, abmelden, setDataPw, info, nurKonten,
-    openLogin, openAdmin, settingsHtml, wireSettings, pushSend, hinweis, kiServer, ki, pushEnable, pushSupported, clearBadge };
+    openLogin, openAdmin, pushFrage, pushFrageStart, settingsHtml, wireSettings, pushSend, hinweis, kiServer, ki, pushEnable, pushSupported, clearBadge };
 })();

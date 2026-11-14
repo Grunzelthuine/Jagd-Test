@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.14.0';
+const APP_VERSION = '1.14.1';
 /* Einstellungen je Installation (config.js): Konten-Server, Test-Umgebung */
 const CONF = self.JAGD_CFG || {};
 const LSP = CONF.lsPrefix || '';
@@ -183,7 +183,7 @@ if ((state.cfg.mode !== 'voll' && location.hostname.endsWith('.github.io')) || C
   const d = defaultCfg(); Object.assign(state.cfg, { owner: d.owner, repo: d.repo });
 }
 /* Zugang: GitHub-Token auf dem Gerät (bisher) ODER Konto beim Konten-Server */
-const tokenAdmin = () => !!(state.cfg.mode === 'voll' && state.cfg.token && state.cfg.owner && state.cfg.repo);
+const tokenAdmin = () => !CONF.nurKonto && !!(state.cfg.mode === 'voll' && state.cfg.token && state.cfg.owner && state.cfg.repo);
 const viaKonto = () => !tokenAdmin() && !!window.Konto?.hatZugang();
 const isAdmin = () => tokenAdmin() || !!(window.Konto?.isAdmin() && state.cfg.owner && state.cfg.repo);
 /** Einzelrechte (vom Admin je Person freigegeben) */
@@ -1392,7 +1392,7 @@ function openSheet(title, body, foot = '', { overLock = false } = {}) {
   if ($('#sheet').hidden) history.pushState({ hs: 'sheet' }, '');
   $('#sheetTitle').textContent = title;
   $('#sheetBody').innerHTML = body;
-  $('#sheetFoot').innerHTML = foot;
+  $('#sheetFoot').innerHTML = foot || '<button class="btn secondary block" data-close>Zurück</button>';
   $('#sheet').hidden = false;
   flowCheck();
   $('#sheet').style.zIndex = overLock ? 1160 : '';
@@ -1455,6 +1455,7 @@ function openDetail(id) {
   const pend = pendingIds().has(id);
   const a = artOf(s);
   const me = state.me;
+  const adm = isAdmin();
   const fotoOld = v => v.foto && (!s.foto || v.foto.f !== s.foto.f);
   const panoOld = v => v.pano && (!s.pano || v.pano.f !== s.pano.f);
   const um = s.umstellung, okI = b => b ? '✓' : '–';
@@ -1471,19 +1472,19 @@ function openDetail(id) {
     </div>
     ${s.bemerkung ? `<div class="note">${esc(s.bemerkung)}</div>` : ''}
     <dl class="facts">
-      <dt>${bereicheOf(s).length > 1 ? 'Schießbereiche' : 'Schießbereich'}</dt><dd>${bereicheOf(s).length ? bereicheOf(s).map(bereichTxt).join('<br>') : 'nicht angegeben'}</dd>
+      ${adm ? `<dt>${bereicheOf(s).length > 1 ? 'Schießbereiche' : 'Schießbereich'}</dt><dd>${bereicheOf(s).length ? bereicheOf(s).map(bereichTxt).join('<br>') : 'nicht angegeben'}</dd>` : ''}
       ${windFuerSitz(s) ? `<dt>Wind jetzt</dt><dd>${windFuerSitz(s)}</dd>` : ''}
       ${me ? `<dt>Entfernung</dt><dd>${distM(me, s) <= Math.max(10, me.acc || 0) ? 'Du bist am Sitz' : `${distTxt(distM(me, s))} Richtung ${dirName(bearing(me, s))}`}</dd>` : ''}
-      <dt>Steht hier seit</dt><dd>${dateDE(s.seit)}</dd>
+      ${adm ? `<dt>Steht hier seit</dt><dd>${dateDE(s.seit)}</dd>
       <dt>Koordinaten</dt><dd>${coordTxt(s)}${s.acc ? ` <span class="sub">(±${Math.round(s.acc)} m)</span>` : ''}</dd>
-      <dt>Geändert</dt><dd>${dtDE(s.geaendert)}</dd>
+      <dt>Geändert</dt><dd>${dtDE(s.geaendert)}</dd>` : ''}
     </dl>
     <div class="btn-row">
       <button class="btn secondary small" id="detMap">📍 Auf Karte zeigen</button>
-      <button class="btn secondary small" id="detCopy">Koordinaten kopieren</button>
+      ${adm ? '<button class="btn secondary small" id="detCopy">Koordinaten kopieren</button>' : ''}
     </div>
     ${flaecheSection(s)}
-    ${s.verlauf.length ? `<h2 class="section">Standorte (${s.verlauf.length + 1})</h2>
+    ${adm && s.verlauf.length ? `<h2 class="section">Standorte (${s.verlauf.length + 1})</h2>
     <div class="card pad"><ul class="hist">
       <li class="cur"><i></i><div><b>Aktuell</b> · seit ${dateDE(s.seit)}<small>${coordTxt(s)}</small></div></li>
       ${s.verlauf.map((v, i) => `<li><i></i><div><b>${dateDE(v.von)} – ${dateDE(v.bis)}</b><small>${distTxt(distM(v, s))} vom heutigen Standort · ${coordTxt(v)}</small>
@@ -1496,14 +1497,14 @@ function openDetail(id) {
     </ul></div>` : ''}
     ${isAdmin() ? '<button class="btn danger block" id="detDel" style="margin-top:22px">Hochsitz löschen</button>' : ''}`;
   const foot = isAdmin() ? `<button class="btn secondary" id="detEdit">Bearbeiten</button><button class="btn" id="detMove">⇄ Umstellen</button>`
-    : canZustand() ? '<button class="btn" id="detZustand">Zustand ändern</button>' : '';
+    : canZustand() ? '<button class="btn" id="detZustand">⚠ Mangel melden</button>' : '';
   openSheet(s.name, body, foot);
   const root = $('#sheet');
   hydrateImages(root);
   $('#detFoto')?.addEventListener('click', () => openViewer(s.foto.f, s.name));
   $('#detPano')?.addEventListener('click', () => openViewer(s.pano.f, `${s.name} · Panorama`, true));
   $('#detMap').onclick = () => { closeSheet(); focusSitz(s); };
-  $('#detCopy').onclick = async () => { try { await navigator.clipboard.writeText(coordTxt(s)); toast('Koordinaten kopiert'); } catch { toast(coordTxt(s), 5000); } };
+  if ($('#detCopy')) $('#detCopy').onclick = async () => { try { await navigator.clipboard.writeText(coordTxt(s)); toast('Koordinaten kopiert'); } catch { toast(coordTxt(s), 5000); } };
   $$('[data-hfoto]', root).forEach(b => b.onclick = () => openViewer(s.verlauf[b.dataset.hfoto].foto.f, `${s.name} · bis ${dateDE(s.verlauf[b.dataset.hfoto].bis)}`));
   $$('[data-hpano]', root).forEach(b => b.onclick = () => openViewer(s.verlauf[b.dataset.hpano].pano.f, `${s.name} · Panorama bis ${dateDE(s.verlauf[b.dataset.hpano].bis)}`, true));
   $$('[data-hmap]', root).forEach(b => b.onclick = () => {
@@ -1511,10 +1512,10 @@ function openDetail(id) {
     switchTab('karte'); zeigeAltenStandort(s, v); setTimeout(() => map.fitBounds(L.latLngBounds([[v.lat, v.lng], [s.lat, s.lng]]).pad(0.5), { maxZoom: 18 }), 60);
   });
   $$('[data-hdel]', root).forEach(b => b.onclick = () => {
+    if (b.disabled) return;
     if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = 'Wirklich entfernen?'; return; }
     const n = clone(s); n.verlauf.splice(Number(b.dataset.hdel), 1); n.geaendert = new Date().toISOString();
-    enqueue({ t: 'put', sitzId: s.id, sitzName: s.name, sitz: n, msg: `Alten Standort von „${s.name}“ entfernt` });
-    openDetail(s.id);
+    enqueue({ t: 'put', sitzId: s.id, sitzName: s.name, sitz: n, msg: `Alten Standort von „${s.name}“ entfernt` }).then(() => openDetail(s.id));
   });
   wireFlaecheSection(s);
   $('#detEdit')?.addEventListener('click', () => openCapture('bearbeiten', s.id));
@@ -1525,8 +1526,9 @@ function openDetail(id) {
     const b = e.currentTarget, fehlt = !bereicheOf(s).length || !s.foto;
     if (fehlt && !b.dataset.sure) { b.dataset.sure = 1; b.textContent = 'Fehlt noch etwas – trotzdem abschließen?'; return; }
     const n = clone(s); delete n.umstellung; n.geaendert = new Date().toISOString();
-    enqueue({ t: 'put', sitzId: s.id, sitzName: s.name, sitz: n, msg: `Umstellung „${s.name}“ abgeschlossen` });
-    toast('Umstellung abgeschlossen ✓'); setTimeout(() => openDetail(s.id), 200);
+    b.disabled = true;
+    enqueue({ t: 'put', sitzId: s.id, sitzName: s.name, sitz: n, msg: `Umstellung „${s.name}“ abgeschlossen` }).then(() => openDetail(s.id));
+    toast('Umstellung abgeschlossen ✓');
   });
   $('#detDel')?.addEventListener('click', e => {
     const b = e.currentTarget;
@@ -1541,9 +1543,10 @@ function openZustand(id) {
   const s = sitzById(id); if (!s || !canZustand()) return;
   if (!state.pw) { openPwSheet(() => openZustand(id)); return; }
   let z = s.zustand;
-  openSheet(`Zustand: ${s.name}`, `
+  openSheet(isAdmin() ? `Zustand: ${s.name}` : `Mangel melden: ${s.name}`, `
+    ${isAdmin() ? '' : '<p class="hint">Ist am Sitz etwas kaputt? Wähle den Zustand und beschreib kurz den Mangel. Ist alles wieder in Ordnung, „gut“ wählen.</p>'}
     <div class="field"><span>Zustand</span><div class="seg" id="zSeg">${Object.entries(ZUSTAND).map(([k, t]) => `<button type="button" data-v="${k}" class="${k === z ? 'on' : ''}">${t}</button>`).join('')}</div></div>
-    <label class="field"><span>Bemerkung (z. B. was ist kaputt?)</span><textarea id="zBem" rows="3">${esc(s.bemerkung)}</textarea></label>
+    <label class="field"><span>${isAdmin() ? 'Bemerkung (z. B. was ist kaputt?)' : 'Was ist kaputt?'}</span><textarea id="zBem" rows="3">${esc(s.bemerkung)}</textarea></label>
     <p class="hint">Die Änderung ist danach für alle sichtbar.</p>`,
     `<button class="btn secondary" data-close>Abbrechen</button><button class="btn" id="zSave">Speichern</button>`);
   $$('#zSeg button').forEach(b => b.onclick = () => { z = b.dataset.v; $$('#zSeg button').forEach(x => x.classList.toggle('on', x === b)); });
@@ -2067,6 +2070,7 @@ function openLecke(id) {
   const pend = pendingIds().has(id);
   const b = lastOf(l, 'bestueckt'), lg = leerGemeldet(l);
   const log = sortWartung(l);
+  const buch = canLecke(), adm = isAdmin();
   openSheet(l.name, `
     ${l.foto ? `<div class="det-photo"><img data-img="${esc(l.foto.t)}" alt="Foto ${esc(l.name)}" id="lkFoto"></div>` : ''}
     <div style="display:flex;gap:6px;flex-wrap:wrap"><span class="badge" style="background:${LECKE.color};color:#fff">Salzlecke</span>${pend ? '<span class="badge wait">noch nicht hochgeladen</span>' : ''}</div>
@@ -2075,30 +2079,32 @@ function openLecke(id) {
     ${l.bemerkung ? `<div class="note">${esc(l.bemerkung)}</div>` : ''}
     <dl class="facts">
       ${state.me ? `<dt>Entfernung</dt><dd>${distM(state.me, l) <= Math.max(10, state.me.acc || 0) ? 'Du bist an der Lecke' : `${distTxt(distM(state.me, l))} Richtung ${dirName(bearing(state.me, l))}`}</dd>` : ''}
-      <dt>Koordinaten</dt><dd>${coordTxt(l)}${l.acc ? ` <span class="sub">(±${Math.round(l.acc)} m)</span>` : ''}</dd>
+      ${adm ? `<dt>Koordinaten</dt><dd>${coordTxt(l)}${l.acc ? ` <span class="sub">(±${Math.round(l.acc)} m)</span>` : ''}</dd>` : ''}
     </dl>
-    <div class="btn-row"><button class="btn secondary small" id="lkMap">📍 Auf Karte zeigen</button><button class="btn secondary small" id="lkCopy">Koordinaten kopieren</button></div>
-    <h2 class="section">Wartungsbuch</h2>
+    <div class="btn-row"><button class="btn secondary small" id="lkMap">📍 Auf Karte zeigen</button>${adm ? '<button class="btn secondary small" id="lkCopy">Koordinaten kopieren</button>' : ''}</div>
+    ${buch ? `<h2 class="section">Wartungsbuch</h2>
     ${log.length ? `<div class="card pad"><ul class="hist">${log.map(w => `<li><i class="w-${esc(w.art)}"></i><div><b>${WARTUNG[w.art] || esc(w.art)}</b> · ${dateDE(w.datum)}${w.notiz ? `<small>${esc(w.notiz)}</small>` : ''}
       ${isAdmin() ? `<div><button class="btn ghost small" data-wdel="${esc(w.id)}" style="color:var(--warn);min-height:30px;padding:2px 0;margin-top:2px">Entfernen</button></div>` : ''}</div></li>`).join('')}</ul></div>` : '<p class="hint">Noch keine Einträge.</p>'}
-    ${canLecke() ? `<div class="btn-row"><button class="btn secondary small" id="lkKontr">Kontrolliert</button><button class="btn secondary small" id="lkRep">Repariert</button>${lg ? '' : '<button class="btn secondary small" id="lkLeer">Leer melden</button>'}${isAdmin() ? '<button class="btn secondary small" id="lkEdit">Bearbeiten</button>' : ''}</div>` : ''}
+    <div class="btn-row"><button class="btn secondary small" id="lkKontr">Kontrolliert</button><button class="btn secondary small" id="lkRep">Repariert</button>${adm ? '<button class="btn secondary small" id="lkEdit">Bearbeiten</button>' : ''}</div>` : ''}
     ${isAdmin() ? '<button class="btn danger block" id="lkDel" style="margin-top:18px">Salzlecke löschen</button>' : ''}`,
-    canLecke() ? `<button class="btn" id="lkBest">✓ Bestückt</button>` : canLeerMelden() && !lg ? '<button class="btn" id="lkLeer">Leer melden</button>' : '');
+    buch ? `${lg ? '' : '<button class="btn secondary" id="lkLeer">Leer melden</button>'}<button class="btn" id="lkBest">✓ Bestückt</button>`
+      : canLeerMelden() && !lg ? '<button class="btn" id="lkLeer">Leer melden</button>' : '');
   const root = $('#sheet');
   hydrateImages(root);
   $('#lkFoto')?.addEventListener('click', () => openViewer(l.foto.f, l.name));
   $('#lkMap').onclick = () => { closeSheet(); focusSitz(l); };
-  $('#lkCopy').onclick = async () => { try { await navigator.clipboard.writeText(coordTxt(l)); toast('Koordinaten kopiert'); } catch { toast(coordTxt(l), 5000); } };
+  if ($('#lkCopy')) $('#lkCopy').onclick = async () => { try { await navigator.clipboard.writeText(coordTxt(l)); toast('Koordinaten kopiert'); } catch { toast(coordTxt(l), 5000); } };
   $('#lkBest')?.addEventListener('click', () => openWartung(id, 'bestueckt'));
   $('#lkKontr')?.addEventListener('click', () => openWartung(id, 'kontrolliert'));
   $('#lkRep')?.addEventListener('click', () => openWartung(id, 'repariert'));
   $('#lkLeer')?.addEventListener('click', () => openWartung(id, 'leer'));
   $('#lkEdit')?.addEventListener('click', () => openLeckeCapture('bearbeiten', id));
   $$('[data-wdel]', root).forEach(btn => btn.onclick = () => {
+    if (btn.disabled) return;
     if (!btn.dataset.sure) { btn.dataset.sure = 1; btn.textContent = 'Wirklich entfernen?'; return; }
+    btn.disabled = true;
     const n = clone(l); n.wartung = n.wartung.filter(w => w.id !== btn.dataset.wdel); n.geaendert = new Date().toISOString();
-    enqueue({ t: 'put', coll: 'lecken', sitzId: id, sitzName: l.name, sitz: n, msg: `Wartungseintrag bei „${l.name}“ entfernt` });
-    openLecke(id);
+    enqueue({ t: 'put', coll: 'lecken', sitzId: id, sitzName: l.name, sitz: n, msg: `Wartungseintrag bei „${l.name}“ entfernt` }).then(() => openLecke(id));
   });
   $('#lkDel')?.addEventListener('click', e => {
     const btn = e.currentTarget;
@@ -2115,13 +2121,15 @@ function openWartung(id, art = 'bestueckt') {
   if (!state.pw) { openPwSheet(() => openWartung(id, art)); return; }
   let a = art;
   const arten = nurLeer ? { leer: WARTUNG.leer } : WARTUNG;
-  openSheet(l.name, `
+  openSheet(art === 'leer' ? `Leer melden: ${l.name}` : l.name, `
     ${nurLeer ? '<p class="hint" style="margin-top:0">Die Lecke ist leer und sollte bestückt werden? Dann hier melden – Sebastian sieht es in der Liste und auf der Karte.</p>'
       : `<div class="field"><span>Was wurde gemacht?</span><div class="seg" id="wArt">${Object.entries(arten).map(([k, t]) => `<button type="button" data-v="${k}" class="${k === a ? 'on' : ''}">${k === 'leer' ? 'Leer' : t}</button>`).join('')}</div></div>`}
     <label class="field"><span>Datum</span><input type="date" id="wDatum" value="${todayISO()}"></label>
     <label class="field"><span>Notiz (optional)</span><input id="wNotiz" placeholder="${nurLeer ? 'z. B. Stein ganz weg, nur noch Reste' : 'z. B. neuer Stein, Pfahl erneuert'}" autocomplete="off"></label>`,
     `<button class="btn secondary" data-close>Abbrechen</button><button class="btn" id="wSave">${nurLeer ? 'Leer melden' : 'Abhaken'}</button>`);
-  $$('#wArt button').forEach(b => b.onclick = () => { a = b.dataset.v; $$('#wArt button').forEach(x => x.classList.toggle('on', x === b)); });
+  const knopf = () => { $('#wSave').textContent = a === 'leer' ? 'Leer melden' : `✓ ${WARTUNG[a]} eintragen`; };
+  $$('#wArt button').forEach(b => b.onclick = () => { a = b.dataset.v; $$('#wArt button').forEach(x => x.classList.toggle('on', x === b)); knopf(); });
+  if (!nurLeer) knopf();
   $('#wSave').onclick = () => {
     const datum = $('#wDatum').value || todayISO();
     const notiz = $('#wNotiz').value.trim();
@@ -2131,7 +2139,7 @@ function openWartung(id, art = 'bestueckt') {
     closeSheet();
     enqueue({ t: 'put', coll: 'lecken', sitzId: id, sitzName: l.name, sitz: n, msg: `Salzlecke „${l.name}“: ${WARTUNG[a]} ${dateDE(datum)}`,
       ...(a === 'leer' ? { hinweis: { art: 'leer', title: '🧂 Salzlecke leer gemeldet', body: `${l.name}${notiz ? ` – ${notiz}` : ''} (${dateDE(datum)}, ${window.Konto?.user()?.name || 'unbekannt'})` } } : {}) });
-    toast(`✓ ${l.name}: ${WARTUNG[a]}`);
+    toast(a === 'leer' ? `${l.name}: leer gemeldet` : `✓ ${l.name}: ${WARTUNG[a]}`);
   };
 }
 
@@ -2461,9 +2469,11 @@ function openSettings(fromLock = false) {
   const c = state.cfg;
   const voll = c.mode === 'voll';
   const adm = isAdmin();
+  const ohneToken = !!CONF.nurKonto;
+  const kontoAktiv = !!window.Konto?.hatZugang();
   openSheet('Einstellungen', `
     ${window.Konto?.settingsHtml() || ''}
-    ${CONF.api ? `<details ${voll ? 'open' : ''}><summary style="font-weight:600;cursor:pointer;padding:4px 0">Zugang mit GitHub-Token (bisherige Methode)</summary>` : ''}
+    ${ohneToken ? '' : `${CONF.api ? `<details ${voll ? 'open' : ''}><summary style="font-weight:600;cursor:pointer;padding:4px 0">Zugang mit GitHub-Token (bisherige Methode)</summary>` : ''}
     <fieldset><legend>Zugang auf diesem Gerät</legend>
       <div class="seg" id="sMode"><button type="button" data-v="" class="${voll ? '' : 'on'}">Nur ansehen</button><button type="button" data-v="voll" class="${voll ? 'on' : ''}">Voller Zugang</button></div>
       <div id="sVoll" ${voll ? '' : 'hidden'}>
@@ -2476,7 +2486,7 @@ function openSettings(fromLock = false) {
         <p class="hint" id="sTestMsg"></p>
       </div>
     </fieldset>
-    ${CONF.api ? '</details>' : ''}
+    ${CONF.api ? '</details>' : ''}`}
     ${adm && !fromLock ? `<fieldset><legend>Reviergrenze</legend>
       <p class="hint">${state.data.revier ? `Eingetragen: <b>${esc(state.data.revier.name || 'Revier')}</b> · ${areaTxt(state.data.revier.m2)} · Stand ${dateDE(state.data.revier.datum)}` : 'Noch keine Reviergrenze eingetragen.'} Import aus Google My Maps (KML/KMZ) oder GeoJSON.</p>
       <div class="btn-row"><button type="button" class="btn secondary small" id="sRev">${state.data.revier ? 'Neu importieren' : 'Reviergrenze importieren'}</button>${state.data.revier ? '<button type="button" class="btn ghost small" id="sRevDel" style="color:var(--warn)">Entfernen</button>' : ''}</div>
@@ -2486,8 +2496,9 @@ function openSettings(fromLock = false) {
       <button type="button" class="btn secondary small" id="sPw">${state.remoteEnc ? 'Passwort ändern' : state.pw ? 'Passwort neu festlegen' : 'Passwort festlegen'}</button>
     </fieldset>` : ''}
     <fieldset><legend>Dieses Gerät</legend>
-      <button type="button" class="btn secondary small" id="sClear">Gespeicherte Fotos auf dem Gerät löschen</button>
-      ${state.pw && !fromLock ? '<button type="button" class="btn ghost small" id="sForget" style="color:var(--warn)">Passwort auf diesem Gerät vergessen</button>' : ''}
+      <p class="hint">Damit die App schnell ist und auch ohne Netz im Revier läuft, merkt sie sich geladene Fotos auf dem Handy. Wird der Speicher knapp, kannst du sie hier löschen – <b>online bleibt alles erhalten</b>, die Fotos werden beim nächsten Ansehen einfach neu geladen.</p>
+      <button type="button" class="btn secondary small" id="sClear">Zwischengespeicherte Fotos löschen</button>
+      ${state.pw && !fromLock && !kontoAktiv ? '<p class="hint" style="margin-top:10px">Das Passwort der Jagdgemeinschaft ist auf diesem Handy gespeichert. Gibst du das Handy weiter, kannst du es hier entfernen.</p><button type="button" class="btn ghost small" id="sForget" style="color:var(--warn)">Passwort auf diesem Gerät vergessen</button>' : ''}
       <button type="button" class="btn ghost small" id="sReload">App neu laden</button>
       <p class="hint" id="sDevMsg"></p>
     </fieldset>
@@ -2498,9 +2509,10 @@ function openSettings(fromLock = false) {
     `<button class="btn secondary" data-close>Schließen</button><button class="btn" id="sSave">Übernehmen</button>`, { overLock: fromLock });
   window.Konto?.wireSettings($('#sheet'), { over: fromLock });
   let mode = c.mode;
+  if (ohneToken) { $('#sSave').hidden = true; $('#sheetFoot .btn.secondary').textContent = 'Zurück'; }
   $$('#sMode button').forEach(b => b.onclick = () => { mode = b.dataset.v; $$('#sMode button').forEach(x => x.classList.toggle('on', x === b)); $('#sVoll').hidden = mode !== 'voll'; });
-  const read = () => ({ mode, token: $('#sToken').value.trim(), owner: $('#sOwner').value.trim(), repo: $('#sRepo').value.trim() });
-  $('#sTest').onclick = async () => {
+  const read = () => ohneToken ? { mode: '', token: '', owner: c.owner, repo: c.repo } : ({ mode, token: $('#sToken').value.trim(), owner: $('#sOwner').value.trim(), repo: $('#sRepo').value.trim() });
+  if ($('#sTest')) $('#sTest').onclick = async () => {
     const v = read(); const msg = $('#sTestMsg'); msg.textContent = 'Prüfe …';
     try {
       const r = await fetch(`https://api.github.com/repos/${encodeURIComponent(v.owner)}/${encodeURIComponent(v.repo)}`, { headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${v.token}` }, cache: 'no-store' });
@@ -2519,7 +2531,7 @@ function openSettings(fromLock = false) {
     const keep = new Set(state.queue.flatMap(o => o.files));
     const keys = (await idbKeys()) || [];
     let n = 0; for (const k of keys) if (String(k).startsWith('bin:') && !keep.has(k.slice(4))) { await idbDel(k); n++; }
-    $('#sDevMsg').textContent = `${n} Dateien gelöscht. Fotos werden bei Bedarf neu geladen.`;
+    $('#sDevMsg').textContent = `${n} Fotos vom Handy gelöscht – sie werden beim nächsten Ansehen neu geladen.`;
   };
   $('#sForget')?.addEventListener('click', () => { lsSet(LS_PW, undefined); lsSet(LS_DATA, undefined); state.pw = ''; location.reload(); });
   $('#sReload').onclick = async () => {
@@ -2571,6 +2583,8 @@ setInterval(() => { if (document.visibilityState === 'visible' && $('#sheet').hi
     onChange: () => { refreshLockKonto(); if (state.loaded) { render(); updateBanner(); if (state.queue.length && canWrite()) flush(); } },
   });
   refreshLockKonto();
+  // Nur noch Konten: ohne angemeldetes Konto mit Zugang gilt ein früher gespeichertes Gruppen-Passwort nicht mehr
+  if (CONF.nurKonto && state.pw && !window.Konto?.hatZugang()) { state.pw = ''; lsSet(LS_PW, undefined); }
   initMap();
   flowInit();
   switchTab(state.view.tab === 'liste' ? 'liste' : 'karte', true);
@@ -2581,6 +2595,7 @@ setInterval(() => { if (document.visibilityState === 'visible' && $('#sheet').hi
   loadWind(true);
   load._last = Date.now();
   await load();
+  window.Konto?.pushFrageStart?.();
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
     navigator.serviceWorker.register('sw.js').then(reg => {
       reg.addEventListener('updatefound', () => {

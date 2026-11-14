@@ -9,4 +9,5 @@ self.JAGD_CFG = {
   owner: 'Grunzelthuine',
   repo: 'Jagd-Test',
   base: 'hochsitze/',
+  nurKonto: true,           // nur noch Anmeldung mit Konto (kein Gruppen-Passwort, kein Token)
 };

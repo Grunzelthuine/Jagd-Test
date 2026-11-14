@@ -113,6 +113,7 @@ async function route(req, env, ctx) {
 
   if (p === '/konto/registrieren' && m === 'POST') return registrieren(req, env);
   if (p === '/konto/anmelden' && m === 'POST') return anmelden(req, env);
+  if (p === '/konto/passwort-vergessen' && m === 'POST') return passwortVergessen(req, env, ctx);
   if (p === '/konto/ich' && m === 'GET') { const u = await auth(req, env); return json(await ichAntwort(u, env)); }
   if (p === '/konto/passwort' && m === 'POST') return passwortAendern(req, env);
 
@@ -214,7 +215,7 @@ const isAnyAdmin = u => u.super || Object.keys(CONFIG.apps).some(a => isAppAdmin
 
 function publicUser(u) {
   return {
-    id: u.id, name: u.name, status: u.status, super: !!u.super, erstellt: u.erstellt, zuletzt: u.zuletzt || null,
+    id: u.id, name: u.name, status: u.status, super: !!u.super, erstellt: u.erstellt, zuletzt: u.zuletzt || null, pwVergessen: u.pwVergessen || null,
     apps: Object.fromEntries(Object.keys(CONFIG.apps).map(a => [a, { rolle: appRolle(u, a), rechte: u.apps?.[a]?.rechte || [], hinweise: hinweiseVon(u, a) }])),
   };
 }
@@ -245,7 +246,25 @@ async function registrieren(req, env) {
   await putUsers(env, users);
   await log(env, u, first ? 'Erstes Konto (Haupt-Admin) angelegt' : 'Konto beantragt', { app: '-' });
   if (first) return json({ token: await makeToken(env, u), ...(await ichAntwort(u, env)) });
+  await sendeAnAdmins(env, { title: '👤 Neuer Kontoantrag', body: `${name} möchte ein Konto – bitte unter Einstellungen → Konten freigeben.`, tag: 'konto-' + u.id }).catch(() => {});
   return json({ wartend: true, user: publicUser(u) });
+}
+
+/** Passwort vergessen: markiert das Konto und benachrichtigt die Admins (höchstens 1× pro Stunde je Konto) */
+async function passwortVergessen(req, env, ctx) {
+  const b = await body(req);
+  const name = normName(b.name || '');
+  const users = await getUsers(env);
+  const u = Object.values(users).find(x => nameKey(x.name) === nameKey(name));
+  if (u && u.status !== 'wartend' && !(u.pwVergessen && Date.now() - Date.parse(u.pwVergessen) < 3600e3)) {
+    u.pwVergessen = new Date().toISOString();
+    await putUsers(env, users);
+    ctx.waitUntil(Promise.all([
+      log(env, u, 'Passwort vergessen gemeldet', { app: '-' }),
+      sendeAnAdmins(env, { title: '🔑 Passwort vergessen', body: `${u.name} hat das Passwort vergessen – bitte unter Einstellungen → Konten ein neues Startpasswort setzen.`, tag: 'pwv-' + u.id }, u.id).catch(() => {}),
+    ]));
+  }
+  return json({ ok: true });
 }
 
 async function anmelden(req, env) {
@@ -263,7 +282,7 @@ async function anmelden(req, env) {
   }
   if (u.status === 'wartend') fail(403, 'Dein Konto wartet noch auf die Freigabe durch Sebastian.');
   if (u.status !== 'aktiv') fail(403, 'Dein Konto ist gesperrt.');
-  u.fehl = 0; delete u.sperrBis; u.zuletzt = new Date().toISOString();
+  u.fehl = 0; delete u.sperrBis; delete u.pwVergessen; u.zuletzt = new Date().toISOString();
   await putUsers(env, users);
   return json({ token: await makeToken(env, u), ...(await ichAntwort(u, env)) });
 }
@@ -336,7 +355,7 @@ async function adminKontoAendern(req, env) {
       if (JSON.stringify(alt.slice().sort()) !== JSON.stringify(neu.slice().sort())) was.push(`${CONFIG.apps[a].name}: Benachrichtigungen ${neu.length ? neu.map(h => CONFIG.apps[a].hinweise[h].name).join(', ') : 'keine'}`);
     }
   }
-  if (b.neuesPw) { checkNewPw(b.neuesPw); u.pw = await hashPw(b.neuesPw); u.sv = (u.sv || 0) + 1; u.fehl = 0; delete u.sperrBis; was.push('Passwort neu gesetzt'); }
+  if (b.neuesPw) { checkNewPw(b.neuesPw); u.pw = await hashPw(b.neuesPw); u.sv = (u.sv || 0) + 1; u.fehl = 0; delete u.sperrBis; delete u.pwVergessen; was.push('Passwort neu gesetzt'); }
   if (b.name && normName(b.name) !== u.name) {
     const n = normName(b.name); checkName(n);
     if (Object.values(users).some(x => x.id !== u.id && nameKey(x.name) === nameKey(n))) fail(409, 'Diesen Namen gibt es schon.');
@@ -608,6 +627,20 @@ async function sendeHinweis(env, app, art, msg) {
     const hier = new Set(Object.values(subs).map(s => s.user).filter(id => offen.has(id)));
     if (!hier.size) continue;
     const r = await sendeAnAlle(env, a, { ...msg, app }, x => !!x && hier.has(x.id));
+    ok += r.ok; hier.forEach(id => erreicht.add(id));
+  }
+  return { ok, gesamt: ziel.size };
+}
+/** Nachricht an alle Admins (Haupt-Admin und App-Admins), je Person einmal, über das erste Gerät-Abo das sie haben */
+async function sendeAnAdmins(env, msg, ausser = null) {
+  const users = await getUsers(env);
+  const ziel = new Set(Object.values(users).filter(u => u.status === 'aktiv' && u.id !== ausser && (u.super || Object.keys(CONFIG.apps).some(a => isAppAdmin(u, a)))).map(u => u.id));
+  const erreicht = new Set(); let ok = 0;
+  for (const a of Object.keys(CONFIG.apps)) {
+    const subs = await kvGet(env, subKey(a), {});
+    const hier = new Set(Object.values(subs).map(s => s.user).filter(id => ziel.has(id) && !erreicht.has(id)));
+    if (!hier.size) continue;
+    const r = await sendeAnAlle(env, a, { ...msg, app: a }, x => !!x && hier.has(x.id));
     ok += r.ok; hier.forEach(id => erreicht.add(id));
   }
   return { ok, gesamt: ziel.size };

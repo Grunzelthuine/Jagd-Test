@@ -5,7 +5,7 @@
 importScripts('config.js');
 const CONF = self.JAGD_CFG || {};
 const PRE = CONF.lsPrefix || '';           // Test-Umgebung: eigene Cache-Namen
-const VERSION = PRE + 'sb-2.24.9';
+const VERSION = PRE + 'sb-2.24.10';
 const BADGE = PRE + 'sb-badge';
 const SHELL = [
   './', 'index.html', 'style.css', 'app.js', 'config.js', 'konto.js', 'manifest.webmanifest',

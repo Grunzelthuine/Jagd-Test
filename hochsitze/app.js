@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.14.1';
+const APP_VERSION = '1.14.2';
 /* Einstellungen je Installation (config.js): Konten-Server, Test-Umgebung */
 const CONF = self.JAGD_CFG || {};
 const LSP = CONF.lsPrefix || '';
@@ -1471,6 +1471,7 @@ function openDetail(id) {
       ${pend ? '<span class="badge wait">noch nicht hochgeladen</span>' : ''}
     </div>
     ${s.bemerkung ? `<div class="note">${esc(s.bemerkung)}</div>` : ''}
+    ${adm && s.zustand !== 'gut' ? '<button class="btn secondary block" id="detBehoben">✓ Mangel behoben</button>' : ''}
     <dl class="facts">
       ${adm ? `<dt>${bereicheOf(s).length > 1 ? 'Schießbereiche' : 'Schießbereich'}</dt><dd>${bereicheOf(s).length ? bereicheOf(s).map(bereichTxt).join('<br>') : 'nicht angegeben'}</dd>` : ''}
       ${windFuerSitz(s) ? `<dt>Wind jetzt</dt><dd>${windFuerSitz(s)}</dd>` : ''}
@@ -1496,8 +1497,10 @@ function openDetail(id) {
         </div></div></li>`).join('')}
     </ul></div>` : ''}
     ${isAdmin() ? '<button class="btn danger block" id="detDel" style="margin-top:22px">Hochsitz löschen</button>' : ''}`;
+  const mangel = s.zustand !== 'gut';
   const foot = isAdmin() ? `<button class="btn secondary" id="detEdit">Bearbeiten</button><button class="btn" id="detMove">⇄ Umstellen</button>`
-    : canZustand() ? '<button class="btn" id="detZustand">⚠ Mangel melden</button>' : '';
+    : canZustand() ? (mangel ? '<button class="btn secondary" id="detZustand">Mangel ändern</button><button class="btn" id="detBehoben">✓ Mangel behoben</button>'
+      : '<button class="btn" id="detZustand">⚠ Mangel melden</button>') : '';
   openSheet(s.name, body, foot);
   const root = $('#sheet');
   hydrateImages(root);
@@ -1520,6 +1523,7 @@ function openDetail(id) {
   wireFlaecheSection(s);
   $('#detEdit')?.addEventListener('click', () => openCapture('bearbeiten', s.id));
   $('#detZustand')?.addEventListener('click', () => openZustand(s.id));
+  $('#detBehoben')?.addEventListener('click', e => mangelBehoben(s.id, e.currentTarget));
   $('#detMove')?.addEventListener('click', () => openCapture('umstellen', s.id));
   $('#umErf')?.addEventListener('click', () => openCapture('bearbeiten', s.id));
   $('#umFin')?.addEventListener('click', e => {
@@ -1538,12 +1542,25 @@ function openDetail(id) {
     enqueue({ t: 'del', sitzId: s.id, sitzName: s.name, msg: `Hochsitz „${s.name}“ gelöscht`, delFiles: files });
   });
 }
+/** Mangel als behoben kennzeichnen: Zustand „In Ordnung“, Bemerkung (Mangelbeschreibung) wird geleert */
+function mangelBehoben(id, btn) {
+  const s = sitzById(id); if (!s || !canZustand() || s.zustand === 'gut') return;
+  if (!state.pw) { openPwSheet(() => openDetail(id)); return; }
+  if (btn && !btn.dataset.sure) { btn.dataset.sure = 1; btn.textContent = 'Wirklich behoben? Nochmal tippen'; return; }
+  if (btn) btn.disabled = true;
+  const n = clone(s); n.zustand = 'gut'; n.bemerkung = ''; n.geaendert = new Date().toISOString();
+  const wer = window.Konto?.user()?.name || 'unbekannt';
+  enqueue({ t: 'put', sitzId: s.id, sitzName: s.name, sitz: n, msg: `Hochsitz „${s.name}“: Mangel behoben${s.bemerkung ? ` (${s.bemerkung})` : ''}`.slice(0, 120),
+    hinweis: { art: 'zustand', title: '✅ Hochsitz wieder in Ordnung', body: `${s.name}${s.bemerkung ? ` – behoben: ${s.bemerkung}` : ''} (${wer})` } })
+    .then(() => openDetail(id));
+  toast(`✓ ${s.name}: Mangel behoben`);
+}
 /** Zustand eines Hochsitzes ändern (Einzelrecht „zustand“ – ohne Bearbeiten-Rechte für alles andere) */
 function openZustand(id) {
   const s = sitzById(id); if (!s || !canZustand()) return;
   if (!state.pw) { openPwSheet(() => openZustand(id)); return; }
   let z = s.zustand;
-  openSheet(isAdmin() ? `Zustand: ${s.name}` : `Mangel melden: ${s.name}`, `
+  openSheet(isAdmin() ? `Zustand: ${s.name}` : s.zustand !== 'gut' ? `Mangel ändern: ${s.name}` : `Mangel melden: ${s.name}`, `
     ${isAdmin() ? '' : '<p class="hint">Ist am Sitz etwas kaputt? Wähle den Zustand und beschreib kurz den Mangel. Ist alles wieder in Ordnung, „gut“ wählen.</p>'}
     <div class="field"><span>Zustand</span><div class="seg" id="zSeg">${Object.entries(ZUSTAND).map(([k, t]) => `<button type="button" data-v="${k}" class="${k === z ? 'on' : ''}">${t}</button>`).join('')}</div></div>
     <label class="field"><span>${isAdmin() ? 'Bemerkung (z. B. was ist kaputt?)' : 'Was ist kaputt?'}</span><textarea id="zBem" rows="3">${esc(s.bemerkung)}</textarea></label>

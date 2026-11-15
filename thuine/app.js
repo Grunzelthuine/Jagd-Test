@@ -26,7 +26,7 @@ async function repairApp() {
 window.addEventListener('error', e => showRescue(e.message));
 window.addEventListener('unhandledrejection', e => { if (!(e.reason && e.reason.name === 'AbortError')) showRescue(e.reason?.message || e.reason); });
 
-const APP_VERSION = '2.24.10';
+const APP_VERSION = '2.24.11';
 /* Einstellungen je Installation (config.js): Konten-Server, Test-Umgebung, abweichende Speicherorte */
 const CONF = self.JAGD_CFG || {};
 const LSP = CONF.lsPrefix || '';
@@ -3460,6 +3460,12 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
       w?.addEventListener('statechange', () => { if (w.state === 'installed' && navigator.serviceWorker.controller) offer(w); });
     });
     setInterval(() => reg.update().catch(() => {}), 30 * 60 * 1000);
+    // iPhone startet die App beim Zurückholen aus dem Hintergrund nicht neu → dann selbst nach Updates schauen
+    let zuletzt = Date.now();
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden || Date.now() - zuletzt < 60e3) return;
+      zuletzt = Date.now(); reg.update().catch(() => {});
+    });
   }).catch(() => {});
   navigator.serviceWorker.addEventListener('controllerchange', reloadOnce);
 }

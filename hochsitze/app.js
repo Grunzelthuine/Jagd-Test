@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.14.4';
+const APP_VERSION = '1.14.5';
 /* Einstellungen je Installation (config.js): Konten-Server, Test-Umgebung */
 const CONF = self.JAGD_CFG || {};
 const LSP = CONF.lsPrefix || '';
@@ -2552,8 +2552,9 @@ function openSettings(fromLock = false) {
   };
   $('#sForget')?.addEventListener('click', () => { lsSet(LS_PW, undefined); lsSet(LS_DATA, undefined); state.pw = ''; location.reload(); });
   $('#sReload').onclick = async () => {
-    try { const regs = await navigator.serviceWorker?.getRegistrations?.(); await Promise.all((regs || []).map(r => r.unregister())); } catch { /* egal */ }
-    try { const keys = await caches.keys(); await Promise.all(keys.filter(k => !k.startsWith('hs-tiles')).map(k => caches.delete(k))); } catch { /* egal */ }
+    // nur diese App (andere Apps auf derselben Adresse bleiben unberührt)
+    try { const reg = await navigator.serviceWorker?.getRegistration?.(); await reg?.unregister(); } catch { /* egal */ }
+    try { const pre = (CONF.lsPrefix || '') + 'hs-'; const keys = await caches.keys(); await Promise.all(keys.filter(k => k.startsWith(pre) && !k.startsWith('hs-tiles')).map(k => caches.delete(k))); } catch { /* egal */ }
     location.replace(location.pathname + '?r=' + Date.now());
   };
   $('#sSave').onclick = () => {
@@ -2622,17 +2623,35 @@ setInterval(() => { if (document.visibilityState === 'visible' && $('#sheet').hi
   await load();
   window.Konto?.pushFrageStart?.();
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
-    navigator.serviceWorker.register('sw.js').then(reg => {
+    const hatteSW = !!navigator.serviceWorker.controller;
+    let neu = false;
+    const reloadOnce = () => { if (!neu) { neu = true; location.reload(); } };
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (hatteSW) reloadOnce(); });
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => {
+      const anbieten = w => {
+        const b = $('#banner'); b.className = 'banner'; b.hidden = false;
+        b.innerHTML = '<span>✨ Neue Version verfügbar</span><button class="btn small" id="updBtn">Neu laden</button>';
+        $('#updBtn').onclick = () => {
+          b.innerHTML = '<span>Neue Version wird geladen …</span>';
+          // iPhone-Web-Apps melden den Wechsel nicht immer zuverlässig → mehrere Wege zum Neuladen
+          w.addEventListener('statechange', () => { if (w.state === 'activated') reloadOnce(); });
+          w.postMessage('skipWaiting');
+          setTimeout(reloadOnce, 1500);
+        };
+      };
+      // schon fertig geladene, aber noch wartende Version (z. B. Hinweis beim letzten Mal übersehen)
+      if (reg.waiting && navigator.serviceWorker.controller) anbieten(reg.waiting);
       reg.addEventListener('updatefound', () => {
         const nw = reg.installing;
-        nw?.addEventListener('statechange', () => {
-          if (nw.state === 'installed' && navigator.serviceWorker.controller) {
-            const b = $('#banner'); b.className = 'banner'; b.hidden = false;
-            b.innerHTML = '<span>✨ Neue Version verfügbar</span><button class="btn small" id="updBtn">Neu laden</button>';
-            $('#updBtn').onclick = () => { nw.postMessage('skipWaiting'); setTimeout(() => location.reload(), 300); };
-          }
-        });
+        nw?.addEventListener('statechange', () => { if (nw.state === 'installed' && navigator.serviceWorker.controller) anbieten(nw); });
       });
+      // iPhone startet die App beim Zurückholen aus dem Hintergrund nicht neu → dann selbst nach Updates schauen
+      let zuletzt = Date.now();
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden || Date.now() - zuletzt < 60e3) return;
+        zuletzt = Date.now(); reg.update().catch(() => {});
+      });
+      setInterval(() => reg.update().catch(() => {}), 30 * 60e3);
     }).catch(() => { /* egal */ });
   }
 })();

@@ -234,7 +234,9 @@ legend { font: 600 15px var(--serif); color: var(--green); padding: 0 6px; }
 
 /* ---------- Bild-Betrachter ---------- */
 .viewer { position: fixed; inset: 0; z-index: 1200; background: #0d110b; display: flex; flex-direction: column; }
-.viewer-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: calc(env(safe-area-inset-top, 0px) + 8px) 12px 8px 16px; color: #f4f1de; font-weight: 600; }
+.viewer-bar { display: flex; align-items: center; gap: 12px; padding: calc(env(safe-area-inset-top, 0px) + 8px) 16px 10px 12px; color: #f4f1de; font-weight: 600; }
+#viewerTitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.zurueck-btn.hell { background: #f4f1de; border-color: #f4f1de; color: var(--green); }
 .viewer-body { flex: 1; min-height: 0; overflow: auto; -webkit-overflow-scrolling: touch; display: flex; align-items: center; justify-content: center; touch-action: pan-x pan-y pinch-zoom; }
 .viewer-body img.photo { max-width: 100%; max-height: 100%; object-fit: contain; }
 .viewer-body.pano { justify-content: flex-start; overflow-x: auto; overflow-y: hidden; cursor: grab; padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 40px); }

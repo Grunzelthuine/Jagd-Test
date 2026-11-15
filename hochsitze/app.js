@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.14.2';
+const APP_VERSION = '1.14.3';
 /* Einstellungen je Installation (config.js): Konten-Server, Test-Umgebung */
 const CONF = self.JAGD_CFG || {};
 const LSP = CONF.lsPrefix || '';
@@ -2569,8 +2569,16 @@ $('#refreshBtn').onclick = () => { load(); if (state.queue.length) flush(); };
 $$('.tab').forEach(b => b.onclick = () => switchTab(b.dataset.tab));
 
 /* ================= Start ================= */
-function measureTop() { document.documentElement.style.setProperty('--top-h', $('.topbar').getBoundingClientRect().height + 'px'); }
+function measureTop() {
+  if (document.hidden) return; // im Hintergrund misst iOS die Kopfzeile (ohne Dynamic-Island-Rand) zu klein
+  const h = $('.topbar').getBoundingClientRect().height;
+  if (h > 40) document.documentElement.style.setProperty('--top-h', h + 'px');
+}
+const measureTopSpaet = () => [0, 250, 800].forEach(t => setTimeout(() => { measureTop(); map?.invalidateSize(); }, t));
 window.addEventListener('resize', () => { measureTop(); map?.invalidateSize(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) measureTopSpaet(); });
+window.addEventListener('pageshow', measureTopSpaet);
+window.addEventListener('orientationchange', measureTopSpaet);
 window.addEventListener('online', () => flush());
 /** Uhrzeit-abhängige Anzeigen (Sonnen-Kachel) sofort und dann immer zur vollen Minute neu zeichnen.
  *  Zeitgeber laufen im Hintergrund (v. a. iPhone) nicht weiter – deshalb auch beim Zurückkommen in die App. */

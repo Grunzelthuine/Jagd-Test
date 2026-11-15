@@ -20,6 +20,9 @@
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --tabbar-h: 62px;
   --top-h: 61px;
+  /* Mindesthöhe der Kopfzeile aus CSS (falls die Messung nach dem Aufwachen aus dem Hintergrund zu klein ist) */
+  --top-min: calc(env(safe-area-inset-top, 0px) + 61px);
+  --top: max(var(--top-h), var(--top-min));
   color-scheme: light;
 }
 * { box-sizing: border-box; }
@@ -53,13 +56,13 @@ button { cursor: pointer; }
 .icon-btn.spin svg { animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.banner { position: fixed; left: 12px; right: 12px; top: calc(var(--top-h) + 8px); z-index: 1001; padding: 9px 12px; border-radius: 12px; font-size: 13.5px; background: var(--brass-soft); border: 1px solid #d8c48f; color: #4d3d12; box-shadow: var(--shadow); display: flex; gap: 10px; align-items: center; }
+.banner { position: fixed; left: 12px; right: 12px; top: calc(var(--top) + 8px); z-index: 1001; padding: 9px 12px; border-radius: 12px; font-size: 13.5px; background: var(--brass-soft); border: 1px solid #d8c48f; color: #4d3d12; box-shadow: var(--shadow); display: flex; gap: 10px; align-items: center; }
 .banner.err { background: var(--warn-soft); border-color: #e3bc9a; color: #5a2c10; }
 .banner .btn { min-height: 34px; padding: 5px 12px; font-size: 13px; margin-left: auto; }
 
 /* ---------- Ansichten ---------- */
-main { padding-top: var(--top-h); }
-#view-karte { position: fixed; left: 0; right: 0; top: var(--top-h); bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px)); }
+main { padding-top: var(--top); }
+#view-karte { position: fixed; left: 0; right: 0; top: var(--top); bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px)); }
 .map { position: absolute; inset: 0; background: var(--bg-deep); }
 #view-liste { max-width: 760px; margin: 0 auto; padding: 14px 16px calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px) + 20px); }
 #view-liste > * + * { margin-top: 12px; }
@@ -259,6 +262,7 @@ legend { font: 600 15px var(--serif); color: var(--green); padding: 0 6px; }
 @media (max-width: 400px) {
   .eyebrow { display: none; }
   .topbar-logo { width: 38px; height: 38px; }
+  :root { --top-min: calc(env(safe-area-inset-top, 0px) + 55px); }
 
 }
 .map.z-lo .hs-label { display: none; }

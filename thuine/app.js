@@ -26,7 +26,7 @@ async function repairApp() {
 window.addEventListener('error', e => showRescue(e.message));
 window.addEventListener('unhandledrejection', e => { if (!(e.reason && e.reason.name === 'AbortError')) showRescue(e.reason?.message || e.reason); });
 
-const APP_VERSION = '2.24.14';
+const APP_VERSION = '2.24.15';
 /* Einstellungen je Installation (config.js): Konten-Server, Test-Umgebung, abweichende Speicherorte */
 const CONF = self.JAGD_CFG || {};
 const LSP = CONF.lsPrefix || '';
@@ -817,6 +817,7 @@ function render() {
   renderTage(); renderStrecke(); renderKoenig(); renderSchalen(); renderStart();
   if (state.tab === 'berichte') renderBerichte();
   if (state.tab === 'termine') renderTermine();
+  if (state.tab === 'jagdzeiten') renderJagdzeiten();
 }
 
 function chipsFor(perSpecies, perHund = {}) {
@@ -2762,7 +2763,7 @@ async function exportGesamt(season) {
 
 /* ================= Navigation ================= */
 /** Bereiche: Start → Niederwild (Strecke, Jagdtage, Jagdkönig) oder Schalenwild (Reh & Damm) */
-const sectionOf = tab => tab === 'start' ? 'start' : tab.startsWith('schalen') ? 'schalen' : tab === 'berichte' ? 'berichte' : tab === 'termine' ? 'termine' : 'nieder';
+const sectionOf = tab => tab === 'start' ? 'start' : tab.startsWith('schalen') ? 'schalen' : ['berichte', 'termine', 'jagdzeiten'].includes(tab) ? tab : 'nieder';
 function switchTab(tab, fromPop = false) {
   if (tab === 'schalen') tab = `schalen-${state.schalenArt || 'reh'}`;
   if (tab.startsWith('schalen-')) state.schalenArt = tab.slice(8);
@@ -2783,6 +2784,7 @@ function switchTab(tab, fromPop = false) {
   if (tab === 'start') renderStart();
   if (tab === 'berichte') renderBerichte();
   if (tab === 'termine') renderTermine();
+  if (tab === 'jagdzeiten') renderJagdzeiten();
   window.scrollTo({ top: 0 });
 }
 
@@ -2950,6 +2952,82 @@ function terminCard(t, admin) {
     </div>
   </div>`;
 }
+/* ================= Jagd- und Schonzeiten Niedersachsen =================
+   Daten: data/jagdzeiten.json (öffentlich, nicht verschlüsselt – amtliche Jagdzeiten), Quelle: Nds. Landwirtschaftsministerium.
+   Die Datei wird bei jedem Start neu geladen (offline: letzter Stand) – Änderungen der Verordnung kommen so ohne App-Update an.
+   Der Status (Jagdzeit/Schonzeit) wird jeden Tag neu aus dem Datum berechnet. */
+const LS_JZ = 'sb.jagdzeiten.v1';
+async function loadJagdzeiten() {
+  if (!state.jz) state.jz = lsGet(LS_JZ, null);
+  try {
+    const r = await fetch(`data/jagdzeiten.json?t=${Date.now()}`, { cache: 'no-store' });
+    if (!r.ok) throw new Error(r.status);
+    const j = await r.json();
+    if (!Array.isArray(j.gruppen)) throw new Error('Format');
+    state.jz = j; lsSet(LS_JZ, j);
+  } catch { /* offline: letzter Stand */ }
+  if (state.tab === 'start') renderStart();
+  if (state.tab === 'jagdzeiten') renderJagdzeiten();
+}
+/** Ende des laufenden Zeitraums (ISO), in dem iso liegt */
+function jzEnde(ranges, iso) {
+  const y = +iso.slice(0, 4), md = iso.slice(5);
+  const ends = ranges.filter(([a, b]) => a <= b ? md >= a && md <= b : md >= a || md <= b)
+    .map(([a, b]) => `${a <= b || md <= b ? y : y + 1}-${b}`);
+  // Zusammenhängende Zeiträume (z. B. 20.8.–31.3.) – spätestes Ende
+  return ends.sort().pop();
+}
+const mdDE = iso => { const [, m, d] = iso.split('-').map(Number); return `${d}.${m}.`; };
+/** Status einer Altersklasse: { cls, txt } */
+function jzStatus(k, iso = todayISO()) {
+  if (k.geschont) return { cls: 'zu', txt: 'ganzjährig geschont', offen: false };
+  if (k.ganz) return { cls: 'auf', txt: 'ganzjährig', offen: true };
+  const jz = k.jz || [];
+  if (inJagdzeit(jz, iso)) return { cls: k.sonder ? 'sonder' : 'auf', txt: `${k.sonder ? 'Sonderregel · ' : 'Jagdzeit '}bis ${mdDE(jzEnde(jz, iso)).replace('29.2.', 'Ende Feb.')}`, offen: true };
+  const nb = naechsterBeginn(jz, iso);
+  return { cls: 'zu', txt: nb ? `Schonzeit · ab ${mdDE(nb)}` : 'Schonzeit', offen: false };
+}
+const jzZeitText = k => k.geschont ? 'keine Jagdzeit' : k.ganz ? 'ganzjährig' : jagdzeitText(k.jz).replace(/29\.2\./g, 'Ende Feb.');
+function jzStartMeta() {
+  if (!state.jz) return 'Niedersachsen';
+  const heute = todayISO();
+  const n = state.jz.gruppen.flatMap(g => g.arten).filter(a => a.klassen.some(k => !k.ganz && !k.sonder && jzStatus(k, heute).offen)).length;
+  return `${esc(state.jz.land || 'Niedersachsen')} · Stand ${esc(mdDE(state.jz.stand))}${state.jz.stand.slice(0, 4)} · heute ${n} Arten offen`;
+}
+function renderJagdzeiten() {
+  const el = $('#view-jagdzeiten');
+  if (!el) return;
+  const d = state.jz;
+  if (!d) { el.innerHTML = '<h2 class="section" style="margin-top:4px">Jagd- und Schonzeiten</h2><div class="card pad empty"><p>Die Jagdzeiten konnten nicht geladen werden – bitte mit Internet erneut öffnen.</p></div>'; return; }
+  const heute = todayISO(), nurOffen = !!state.jzNurOffen;
+  const gruppen = d.gruppen.map(g => {
+    const arten = g.arten.map(a => {
+      const kl = a.klassen.filter(k => !nurOffen || jzStatus(k, heute).offen);
+      if (!kl.length) return '';
+      const allein = a.klassen.length === 1 && !a.klassen[0].name;
+      return `<div class="jz-art">
+        <div class="jz-name">${esc(a.name)}</div>
+        ${kl.map(k => { const st = jzStatus(k, heute); return `<div class="jz-kl">
+          <div class="jz-kt">${allein ? '' : `<b>${esc(k.name)}</b>`}<span>${esc(jzZeitText(k))}</span>${k.hinweis ? `<small>${esc(k.hinweis)}</small>` : ''}</div>
+          <span class="jz-st ${st.cls}">${esc(st.txt)}</span></div>`; }).join('')}
+        ${a.hinweis ? `<small class="jz-hw">${esc(a.hinweis)}</small>` : ''}
+      </div>`;
+    }).join('');
+    return arten ? `<h3 class="jz-gr">${esc(g.name)}</h3><div class="card jz-card">${arten}</div>` : '';
+  }).join('');
+  el.innerHTML = `
+    <h2 class="section" style="margin-top:4px">Jagd- und Schonzeiten</h2>
+    <p class="sub jz-kopf">${esc(d.land || 'Niedersachsen')} · Stand <b>${esc(dateDE(d.stand))}</b> · heute ${esc(dateDE(heute))}</p>
+    <div class="seg seg2 jz-seg"><button type="button" data-jzf="alle" class="${nurOffen ? '' : 'on'}">Alle</button><button type="button" data-jzf="offen" class="${nurOffen ? 'on' : ''}">Heute Jagdzeit</button></div>
+    ${gruppen || '<div class="card pad empty"><p>Heute ist für keine Wildart Jagdzeit.</p></div>'}
+    <div class="card pad jz-quelle">
+      <p><b>Quelle:</b> ${d.quelle?.url ? `<a href="${esc(d.quelle.url)}" target="_blank" rel="noopener">${esc(d.quelle.titel || d.quelle.url)}</a>` : esc(d.quelle?.titel || '')}</p>
+      <p class="hint">${esc(d.rechtsgrundlage || '')}. Zuletzt mit der Quelle abgeglichen am ${esc(dateDE(d.geprueft || d.stand))}.</p>
+      <p class="hint">Angaben ohne Gewähr – maßgeblich ist die Verordnung. Örtliche Regelungen (z. B. Abschussplan, Freigabe der Jagdgemeinschaft, Vogelschutz- und Naturschutzgebiete, Elterntierschutz) gelten zusätzlich.</p>
+    </div>`;
+  $$('[data-jzf]', el).forEach(b => b.addEventListener('click', () => { state.jzNurOffen = b.dataset.jzf === 'offen'; renderJagdzeiten(); }));
+}
+
 function renderTermine() {
   const el = $('#view-termine');
   if (!el || !state.data) return;
@@ -3431,6 +3509,11 @@ function renderStart() {
       <span class="st-title">Streckenberichte</span>
       <span class="st-meta">PDF-Berichte aller Jagdjahre</span>
       <span class="st-go" aria-hidden="true">›</span>
+    </button>
+    <button class="start-tile" data-go="jagdzeiten">
+      <span class="st-title">Jagd- und Schonzeiten</span>
+      <span class="st-meta">${jzStartMeta()}</span>
+      <span class="st-go" aria-hidden="true">›</span>
     </button>`;
   $('#btnMelden')?.addEventListener('click', openMelden);
   $('#spGesehen')?.addEventListener('click', () => { const sp = hirschSperre(); if (sp) lsSet(LS_SPERRE_OK, sperreKey(sp)); renderStart(); toast('Ausgeblendet – die Sperre steht weiter auf der Damwild-Seite.', 3500); });
@@ -3524,4 +3607,5 @@ window.Konto?.init({
 });
 refreshLockKonto();
 load().then(() => { loadSchalen(); loadMeldungen(); });
+loadJagdzeiten();
 switchTab('start');

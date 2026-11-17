@@ -5,7 +5,7 @@
 importScripts('config.js');
 const CONF = self.JAGD_CFG || {};
 const PRE = CONF.lsPrefix || '';           // Test-Umgebung: eigene Cache-Namen
-const VERSION = PRE + 'sb-2.24.14';
+const VERSION = PRE + 'sb-2.24.15';
 const BADGE = PRE + 'sb-badge';
 const SHELL = [
   './', 'index.html', 'style.css', 'app.js', 'config.js', 'konto.js', 'manifest.webmanifest',
@@ -34,11 +34,13 @@ self.addEventListener('message', e => {
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.origin !== location.origin) return; // GitHub-API, Konten-Server & KI nie cachen
-  if (url.pathname.endsWith('/data/strecke.json')) {
+  const datei = ['strecke.json', 'jagdzeiten.json'].find(f => url.pathname.endsWith('/data/' + f));
+  if (datei) {
     // Daten: immer Netz, offline letzter Stand
     e.respondWith(fetch(e.request).then(r => {
-      const copy = r.clone(); caches.open(VERSION).then(c => c.put('data/strecke.json', copy)); return r;
-    }).catch(() => caches.match('data/strecke.json')));
+      if (r.ok) { const copy = r.clone(); caches.open(VERSION).then(c => c.put('data/' + datei, copy)); }
+      return r;
+    }).catch(() => caches.match('data/' + datei)));
     return;
   }
   e.respondWith(caches.match(e.request, { ignoreSearch: true }).then(hit => hit || fetch(e.request)));

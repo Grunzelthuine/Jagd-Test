@@ -59,10 +59,12 @@ window.Konto = (() => {
   const token = () => st.token || '';
   const ghBase = () => API + '/gh';
   const dataPw = (app = APP) => st.pw?.[app] || '';
+  /** Konto auf diesem Gerät beantragt, aber noch nicht angemeldet: { name, t } */
+  const beantragt = () => (!loggedIn() && st.beantragt) || null;
 
   function uebernehmen(j) {
     if (j.token) st.token = j.token;
-    st.user = j.user; st.pw = j.pw || {}; st.pwFehlt = j.pwFehlt || [];
+    st.user = j.user; st.pw = j.pw || {}; st.pwFehlt = j.pwFehlt || []; delete st.beantragt;
     save();
   }
   /** Nach Anmeldung/Aktualisierung: Daten-Passwort an die App geben bzw. als Admin hinterlegen */
@@ -169,6 +171,7 @@ window.Konto = (() => {
         try {
           const j = await api('POST', neu ? '/konto/registrieren' : '/konto/anmelden', { name, pw }, { auth: false });
           if (j.wartend) {
+            st.beantragt = { name: j.user?.name || name, t: Date.now() }; save(); H.onChange?.();
             sheet('Konto beantragt', `<p>Danke, <b>${esc(j.user.name)}</b>! Dein Konto ist beantragt.</p><p class="hint">Sebastian wurde benachrichtigt. Sobald er dein Konto freigegeben hat, meldest du dich hier mit Namen und Passwort an.</p>`, '<button class="btn" data-close>OK</button>', over);
             return;
           }
@@ -496,6 +499,6 @@ window.Konto = (() => {
     setTimeout(() => { if (!document.querySelector('#sheet:not([hidden]), dialog[open]')) pushFrage(); }, 1500);
   }
 
-  return { init, enabled, loggedIn, user, rolle, isAdmin, isAnyAdmin, hatZugang, can, token, ghBase, dataPw, refresh, abmelden, setDataPw, info, nurKonten,
+  return { init, enabled, loggedIn, beantragt, user, rolle, isAdmin, isAnyAdmin, hatZugang, can, token, ghBase, dataPw, refresh, abmelden, setDataPw, info, nurKonten,
     openLogin, openAdmin, pushFrage, pushFrageStart, settingsHtml, wireSettings, pushSend, hinweis, kiServer, ki, pushEnable, pushSupported, clearBadge };
 })();

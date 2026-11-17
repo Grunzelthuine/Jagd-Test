@@ -26,7 +26,7 @@ async function repairApp() {
 window.addEventListener('error', e => showRescue(e.message));
 window.addEventListener('unhandledrejection', e => { if (!(e.reason && e.reason.name === 'AbortError')) showRescue(e.reason?.message || e.reason); });
 
-const APP_VERSION = '2.24.16';
+const APP_VERSION = '2.24.17';
 /* Einstellungen je Installation (config.js): Konten-Server, Test-Umgebung, abweichende Speicherorte */
 const CONF = self.JAGD_CFG || {};
 const LSP = CONF.lsPrefix || '';
@@ -411,7 +411,7 @@ async function load(fromUnlock = false) {
     state.data = remote; lsSet(LS_DATA, remote);
     pushMerken();
     render();
-    setTimeout(() => ichFrage(), 1200);
+    setTimeout(async () => { await kontoFrage(); await ichFrage(); }, 1200);
     if (state.schalenFresh) migrateSchalen();
   } catch (e) {
     if (e instanceof NeedPassword) {
@@ -2096,6 +2096,44 @@ function applyAiResult(res, photo) {
   renderEditor();
 }
 
+/* ================= Hinweis „Bitte eigenes Konto anlegen“ =================
+   Für alle, die die App noch mit dem gemeinsamen Passwort nutzen (z. B. nach der Umstellung auf Konten).
+   Kachel oben auf dem Start, solange kein Konto angemeldet ist; dazu einmal ein Fenster (bei „Später“ nach 3 Tagen wieder). */
+const LS_KONTO_FRAGE = 'sb.kontoFrage.v1';
+const kontoHinweisNoetig = () => !!(CONF.api && window.Konto?.enabled() && !Konto.loggedIn() && Konto.user()?.status !== 'gesperrt');
+function kontoKachel() {
+  if (!kontoHinweisNoetig()) return '';
+  const b = Konto.beantragt();
+  if (b) return `<div class="start-tile konto-tile wartet">
+      <span class="st-title">⏳ Dein Konto ist beantragt</span>
+      <span class="st-meta">Sobald Sebastian es freigegeben hat, meldest du dich einmal mit Namen und Passwort an.</span>
+      <div class="kt-btns"><button type="button" class="btn" id="btnKontoLogin">Jetzt anmelden</button></div>
+    </div>`;
+  return `<div class="start-tile konto-tile">
+      <span class="st-title">🔑 Bitte eigenes Konto anlegen</span>
+      <span class="st-meta">Die App hat jetzt eigene Konten. Damit bekommst du Benachrichtigungen (z. B. neue Termine, Damwild) – und das gemeinsame Passwort wird später abgeschaltet. Dauert eine Minute.</span>
+      <div class="kt-btns"><button type="button" class="btn" id="btnKontoNeu">Konto anlegen</button><button type="button" class="btn secondary" id="btnKontoLogin">Ich habe schon eins</button></div>
+    </div>`;
+}
+/** Einmaliges Fenster beim Start (bei „Später“ nach 3 Tagen wieder). Promise erfüllt, wenn geschlossen. */
+function kontoFrage() {
+  if (!kontoHinweisNoetig() || Konto.beantragt() || !state.data || !$('#lock').hidden || !$('#sheet').hidden) return Promise.resolve();
+  if (Date.now() - (lsGet(LS_KONTO_FRAGE, 0) || 0) < 3 * 864e5) return Promise.resolve();
+  return new Promise(resolve => {
+    openSheet('Neu: eigenes Konto', `
+      <p><b>Die App Jagd Thuine hat jetzt eigene Konten.</b> Bitte leg dir einmal ein Konto mit deinem Namen und einem eigenen Passwort an.</p>
+      <ul class="kf-liste"><li>🔔 Benachrichtigungen bei neuen Terminen, Damwild und Hirschjagd-Sperre</li><li>🔑 Das gemeinsame Passwort wird später abgeschaltet – dann geht es nur noch mit Konto</li><li>✓ Sebastian gibt dein Konto frei, danach meldest du dich einmal an</li></ul>
+      <p class="hint">Bis dahin funktioniert alles wie gewohnt.</p>`,
+      '<button class="btn secondary" id="kfSpaeter">Später</button><button class="btn" id="kfNeu">Konto anlegen</button>');
+    lsSet(LS_KONTO_FRAGE, Date.now());
+    let weiter = false;
+    const mo = new MutationObserver(() => { if ($('#sheet').hidden) { mo.disconnect(); resolve(); } });
+    mo.observe($('#sheet'), { attributes: true, attributeFilter: ['hidden'] });
+    $('#kfSpaeter').addEventListener('click', () => closeSheet());
+    $('#kfNeu').addEventListener('click', () => { if (weiter) return; weiter = true; Konto.openLogin({ mode: 'neu' }); });
+  });
+}
+
 /* ================= „Wer bist du?“ – beim ersten Öffnen bzw. nach der ersten Anmeldung ================= */
 const LS_ICH_GEFRAGT = 'sb.ichGefragt.v1';
 const normName = t => String(t || '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -3490,6 +3528,7 @@ function renderStart() {
     </div>
     ${sperreBanner(true)}
     ${erinnerungBanner()}
+    ${kontoKachel()}
     ${installAngebot(true) ? `<button class="start-tile inst-tile" id="btnInstall"><span class="st-title">📲 App installieren</span><span class="st-meta">${installPrompt ? 'Ein Tipp – dann liegt Jagd Thuine auf dem Startbildschirm' : 'So kommt Jagd Thuine auf den Startbildschirm'}</span><span class="st-go" aria-hidden="true">›</span></button>` : ''}
     ${isAdmin() && state.meldungen.length ? `<button class="start-tile ml-tile" id="btnMeldungen"><span class="st-title">📬 ${state.meldungen.length} neue Meldung${state.meldungen.length === 1 ? '' : 'en'}</span><span class="st-meta">antippen zum Prüfen und Übernehmen</span><span class="st-go" aria-hidden="true">›</span></button>` : ''}
     ${canMelden() ? `<button class="start-tile melden-tile" id="btnMelden">
@@ -3517,6 +3556,8 @@ function renderStart() {
       <span class="st-go" aria-hidden="true">›</span>
     </button>`;
   $('#btnMelden')?.addEventListener('click', openMelden);
+  $('#btnKontoNeu')?.addEventListener('click', e => { e.stopPropagation(); Konto.openLogin({ mode: 'neu' }); });
+  $('#btnKontoLogin')?.addEventListener('click', e => { e.stopPropagation(); Konto.openLogin(); });
   $('#spGesehen')?.addEventListener('click', () => { const sp = hirschSperre(); if (sp) lsSet(LS_SPERRE_OK, sperreKey(sp)); renderStart(); toast('Ausgeblendet – die Sperre steht weiter auf der Damwild-Seite.', 3500); });
   $('#btnInstall')?.addEventListener('click', () => startInstall(true));
   $('#btnMeldungen')?.addEventListener('click', openMeldungen);

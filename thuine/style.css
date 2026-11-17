@@ -677,3 +677,7 @@ input[type="date"]::-webkit-date-and-time-value, input[type="time"]::-webkit-dat
 .ich-btn:active { background: var(--green-soft); }
 @media (max-width: 340px) { .ich-liste { grid-template-columns: 1fr; } }
 .tab svg.tab-wide { width: 44px; }
+/* 2.24.14: „Nächstes Stück“ in der Kachel „Aktuelles Stück“ */
+.wb-dran { display: grid; gap: 2px; margin-top: 10px; padding-top: 10px; border-top: 1px dashed #d8c48f; }
+.wb-dran.allein { margin-top: 0; padding-top: 0; border-top: 0; }
+.wb-dran b { font: 600 17px/1.25 var(--serif); color: var(--green); }

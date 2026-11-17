@@ -26,7 +26,7 @@ async function repairApp() {
 window.addEventListener('error', e => showRescue(e.message));
 window.addEventListener('unhandledrejection', e => { if (!(e.reason && e.reason.name === 'AbortError')) showRescue(e.reason?.message || e.reason); });
 
-const APP_VERSION = '2.24.13';
+const APP_VERSION = '2.24.14';
 /* Einstellungen je Installation (config.js): Konten-Server, Test-Umgebung, abweichende Speicherorte */
 const CONF = self.JAGD_CFG || {};
 const LSP = CONF.lsPrefix || '';
@@ -1186,7 +1186,6 @@ function wildbretCard() {
   const last = {}; // Gruppe → letztes Stück
   plan.list.forEach(x => { const g = plan.map[x.id]; if (g && g !== 'keine') last[g] = x; });
   return `<div class="wb-card">
-      <div class="wb-next"><span class="sub">Als Nächstes dran</span><b>${esc(gruppeLabel(plan.next))}</b></div>
       <ol class="wb-list">${gs.map(g => `<li class="${g.id === plan.next ? 'next' : ''}">
         <span class="wb-names">${esc(gruppeLabel(g.id))}</span>
         <small>${last[g.id] ? `zuletzt ${datumText(last[g.id].datum)} · ${esc(katName('damm', last[g.id].kat))}` : '–'}</small></li>`).join('')}</ol>
@@ -1195,14 +1194,16 @@ function wildbretCard() {
     </div>`;
 }
 
-/** Zuletzt erlegtes Stück Damwild (kein Fallwild) und an wen das Wildbret geht – steht immer sichtbar oben */
+/** Zuletzt erlegtes Stück Damwild (kein Fallwild), an wen das Wildbret geht, und wer als Nächstes dran ist –
+    eine Kachel, steht immer sichtbar oben (die Kachel Wildbret-Verteilung ist nur noch die Liste) */
 function aktuellesStueck() {
   const plan = wildbretPlan(), akt = plan.list[plan.list.length - 1];
-  return akt ? `<div class="wb-next wb-akt wb-akt-top">
-        <span class="sub">Aktuelles Stück · ${esc(datumText(akt.datum))}</span>
+  return `<div class="wb-next wb-akt wb-akt-top">
+      ${akt ? `<span class="sub">Aktuelles Stück · ${esc(datumText(akt.datum))}</span>
         <b>🥩 ${esc(gruppeLabel(plan.map[akt.id] || 'keine'))}</b>
-        <small>${esc(katName('damm', akt.kat))} · erlegt von ${esc(schuetzeText(akt) || 'unbekannt')}</small>
-      </div>` : '';
+        <small>${esc(katName('damm', akt.kat))} · erlegt von ${esc(schuetzeText(akt) || 'unbekannt')}</small>` : ''}
+      ${plan.next ? `<div class="wb-dran${akt ? '' : ' allein'}"><span class="sub">Nächstes Stück geht an</span><b>${esc(gruppeLabel(plan.next))}</b></div>` : ''}
+    </div>`;
 }
 
 /* ---------- Aufklappbare Kacheln (Schalenwild) ----------
@@ -1287,7 +1288,7 @@ function renderSchalen() {
   const plural = (n, a, b) => `${n} ${n === 1 ? a : b}`;
   const fgInhalt = art === 'damm' ? freigabeCard() : '';
   const kacheln = [
-    art === 'damm' && aktuell ? klappKachel(`${art}-wildbret`, 'Wildbret-Verteilung', `dran: ${esc(gruppeLabel(plan.next, true).replace(/^\d+\.\s*/, ''))}`, wildbretCard()) : '',
+    art === 'damm' && aktuell ? klappKachel(`${art}-wildbret`, 'Wildbret-Verteilung', `${wvGruppen().length} Gruppen`, wildbretCard()) : '',
     klappKachel(`${art}-uebersicht`, `Übersicht ${esc(state.season)}`, 'nach Kategorie', catTable),
     klappKachel(`${art}-erlegt`, 'Erlegt', plural(erlegt.length, 'Stück', 'Stück'),
       erlegt.length ? `<ul class="nt-list">${[...erlegt].reverse().map(item).join('')}</ul>` : '<p class="sub kk-leer">Noch nichts erlegt in diesem Jagdjahr.</p>'),

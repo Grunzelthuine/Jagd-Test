@@ -30,6 +30,7 @@ const CONFIG = {
         freigabe: 'Damwild-Freigabe ändern',
         sperre: 'Hirschjagd-Sperre setzen und aufheben',
         schalen: 'Reh-, Dam- und Schwarzwild eintragen (bekommt auch die Wildmeldungen)',
+        jagdtage: 'Jagdtage erfassen und bearbeiten (auch per Foto der Erlegerliste)',
       },
       // Benachrichtigungen, die der Admin je Person an- oder abhaken kann.
       // darf = wer sie auslösen darf (Einzelrechte; Admins immer; 'mitglied' = jedes Konto)
@@ -41,7 +42,7 @@ const CONFIG = {
       regeln: [
         // meldenPush: bei neuer Wildmeldung Benachrichtigung an alle mit Hinweis „meldung“ (ersetzt ntfy)
         { repo: 'Streckenbericht-meldungen', pfad: 'meldungen.json', write: 'mitglied', meldenPush: true },
-        { repo: 'Streckenbericht', pfad: 'data/strecke.json', write: ['termine', 'freigabe', 'sperre'] },
+        { repo: 'Streckenbericht', pfad: 'data/strecke.json', write: ['termine', 'freigabe', 'sperre', 'jagdtage'] },
         { repo: 'Streckenbericht-schalenwild', pfad: 'schalenwild.json', write: ['schalen'] },
         { repo: 'Streckenbericht', pfad: '', write: 'admin' },
       ],
@@ -63,7 +64,7 @@ const CONFIG = {
       ],
     },
   },
-  // Foto-Auswertung (Claude). Schlüssel als Secret ANTHROPIC_KEY. Nur Admins dieser App.
+  // Foto-Auswertung (Claude). Schlüssel als Secret ANTHROPIC_KEY. Admins dieser App und Konten mit Einzelrecht jagdtage.
   ki: { app: 'thuine', modell: 'claude-opus-5-5', maxTokens: 3000, proTagUndPerson: 20, proTagGesamt: 60 },
 };
 /* ========================================================= */
@@ -515,7 +516,7 @@ async function kiErlegerliste(req, env, ctx) {
   const K = CONFIG.ki;
   if (!K || !env.ANTHROPIC_KEY) fail(501, 'Foto-Auswertung ist im Server nicht eingerichtet (ANTHROPIC_KEY fehlt).');
   const u = await auth(req, env);
-  if (!isAppAdmin(u, K.app)) fail(403, 'Die Foto-Auswertung dürfen nur Admins nutzen.');
+  if (!hatRecht(u, K.app, 'jagdtage')) fail(403, 'Die Foto-Auswertung dürfen nur Admins und Konten mit dem Recht „Jagdtage erfassen“ nutzen.');
   const b = await body(req);
   const bild = String(b.bild || ''), text = String(b.text || '');
   if (!/^[A-Za-z0-9+/=]+$/.test(bild) || bild.length < 1000) fail(400, 'Kein gültiges Foto.');

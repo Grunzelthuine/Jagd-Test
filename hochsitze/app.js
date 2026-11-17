@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.14.9';
+const APP_VERSION = '1.14.10';
 /* Einstellungen je Installation (config.js): Konten-Server, Test-Umgebung */
 const CONF = self.JAGD_CFG || {};
 const LSP = CONF.lsPrefix || '';
@@ -2566,7 +2566,7 @@ function openSettings(fromLock = false) {
   };
 }
 $('#settingsBtn').onclick = () => openSettings();
-$('#refreshBtn').onclick = () => { load(); if (state.queue.length) flush(); };
+$('#refreshBtn').onclick = () => { window.Konto?.refresh?.(); load(); if (state.queue.length) flush(); };
 $$('.tab').forEach(b => b.onclick = () => switchTab(b.dataset.tab));
 
 /* ================= Start ================= */

@@ -26,7 +26,7 @@ async function repairApp() {
 window.addEventListener('error', e => showRescue(e.message));
 window.addEventListener('unhandledrejection', e => { if (!(e.reason && e.reason.name === 'AbortError')) showRescue(e.reason?.message || e.reason); });
 
-const APP_VERSION = '2.24.12';
+const APP_VERSION = '2.24.13';
 /* Einstellungen je Installation (config.js): Konten-Server, Test-Umgebung, abweichende Speicherorte */
 const CONF = self.JAGD_CFG || {};
 const LSP = CONF.lsPrefix || '';
@@ -3426,16 +3426,6 @@ function renderStart() {
       </span>`).join('') + (kommend.length > 2 ? `<span class="st-meta">+ ${kommend.length - 2} weitere</span>` : '') : '<span class="st-meta">Zurzeit keine Termine eingetragen</span>'}
       <span class="st-go" aria-hidden="true">›</span>
     </button>
-    <div class="st-grid">
-      <button class="start-tile st-half st-sym" data-go="strecke">
-        <span class="st-icon st-wide"><svg viewBox="0 0 120 64" fill="currentColor" aria-hidden="true"><path d="M46 43c4-4 9-7 15-9l11-4c4-1 7-3 9-5l3-4c1-2 3-3 6-3 2 0 4 1 5 2l4 1-3 2c-1 1-2 2-4 2l-2 1c-1 2-2 4-4 5 1 3 0 6-1 8-2 5-7 8-12 9-7 2-15 2-22 1z"/><path d="M52 41 34 46 14 52 2 57l14-2 20-6 18-5z"/><path d="M50 44 30 50 4 61l18-5 22-7z"/><path d="M62 33c-3-4-6-9-7-14l-3-11 4 4-1-9 4 6 1-9 3 7 2-8 2 8 3-7 1 8 3-5-1 8 4-4-1 8 4-2-3 7 4 0-4 5c-3 4-7 6-12 6z"/><path d="M68 46c3 2 6 5 8 8l3 4 1-3 2 4 1-3 3 4 1-3 3 3-1-3 4 1-3-3c-3-3-7-6-11-8-4-2-8-2-12-1z"/></svg></span>
-        <span class="st-title">Niederwild</span>
-      </button>
-      <button class="start-tile st-half st-sym" data-go="schalen">
-        <span class="st-icon"><svg viewBox="0 0 64 64" fill="currentColor" aria-hidden="true"> <path d="M24 26c0-2 3.5-4 8-4s8 2 8 4l-2 18c-.5 4-3 8-6 8s-5.5-4-6-8z"/> <ellipse cx="20" cy="28" rx="6" ry="2.6" transform="rotate(20 20 28)"/> <ellipse cx="44" cy="28" rx="6" ry="2.6" transform="rotate(-20 44 28)"/> <g fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"> <path d="M27 23C22 17 18 13 17 4M20.5 15.5 12 12M18 9.5 12 4.5M23 19.5 15 20"/> <path d="M37 23c5-6 9-10 10-19M43.5 15.5 52 12M46 9.5l6-5M41 19.5 49 20"/> </g> </svg></span>
-        <span class="st-title">Schalenwild</span>
-      </button>
-    </div>
     <button class="start-tile" data-go="berichte">
       <span class="st-title">Streckenberichte</span>
       <span class="st-meta">PDF-Berichte aller Jagdjahre</span>

@@ -18,6 +18,8 @@
 const CONFIG = {
   name: 'Jagd Thuine – TEST',
   owner: 'Grunzelthuine',
+  // Schutz: Nur ein Konto mit genau diesem Namen darf das erste Konto (= Haupt-Admin) werden. Leer = jeder.
+  hauptAdmin: '',
   // Webseiten, die den Server benutzen dürfen
   origins: ['https://grunzelthuine.github.io'],
   apps: {
@@ -27,17 +29,20 @@ const CONFIG = {
         termine: 'Termine eintragen und ändern',
         freigabe: 'Damwild-Freigabe ändern',
         sperre: 'Hirschjagd-Sperre setzen und aufheben',
+        schalen: 'Reh-, Dam- und Schwarzwild eintragen (bekommt auch die Wildmeldungen)',
       },
       // Benachrichtigungen, die der Admin je Person an- oder abhaken kann.
       // darf = wer sie auslösen darf (Einzelrechte; Admins immer; 'mitglied' = jedes Konto)
       hinweise: {
-        meldung: { name: 'Neue Wildmeldung', darf: 'mitglied' },
+        // standard: wer eines dieser Einzelrechte hat, bekommt den Hinweis ohne eigene Auswahl (und beim Vergeben wird er vorausgewählt)
+        meldung: { name: 'Neue Wildmeldung', darf: 'mitglied', standard: ['schalen'] },
       },
       // Erste passende Regel zählt. write: 'admin' | 'mitglied' | [Einzelrechte]
       regeln: [
         // meldenPush: bei neuer Wildmeldung Benachrichtigung an alle mit Hinweis „meldung“ (ersetzt ntfy)
         { repo: 'Jagd-Test', pfad: 'thuine/data/meldungen.json', write: 'mitglied', meldenPush: true },
         { repo: 'Jagd-Test', pfad: 'thuine/data/strecke.json', write: ['termine', 'freigabe', 'sperre'] },
+        { repo: 'Jagd-Test', pfad: 'thuine/data/schalenwild.json', write: ['schalen'] },
         { repo: 'Jagd-Test', pfad: 'thuine/', write: 'admin' },
       ],
     },
@@ -145,9 +150,9 @@ async function info(env) {
   const [users, settings, vapid] = await Promise.all([getUsers(env), getSettings(env), getVapid(env)]);
   return {
     name: CONFIG.name,
-    apps: Object.fromEntries(Object.entries(CONFIG.apps).map(([k, a]) => [k, { name: a.name, rechte: a.rechte, hinweise: Object.fromEntries(Object.entries(a.hinweise || {}).map(([h, x]) => [h, x.name])) }])),
+    apps: Object.fromEntries(Object.entries(CONFIG.apps).map(([k, a]) => [k, { name: a.name, rechte: a.rechte, hinweise: Object.fromEntries(Object.entries(a.hinweise || {}).map(([h, x]) => [h, x.name])), hinweisAuto: Object.fromEntries(Object.entries(a.hinweise || {}).filter(([, x]) => x.standard).map(([h, x]) => [h, x.standard])) }])),
     nurKonten: !!settings.nurKonten,
-    ersterNutzer: !Object.keys(users).length,
+    ersterNutzer: !Object.keys(users).length && !CONFIG.hauptAdmin,
     vapid: vapid.pub,
     ki: !!(env.ANTHROPIC_KEY && CONFIG.ki),
   };
@@ -209,7 +214,9 @@ const hatRecht = (u, app, r) => isAppAdmin(u, app) || (hatZugang(u, app) && (u.a
 const hinweiseVon = (u, app) => {
   const alle = Object.keys(CONFIG.apps[app].hinweise || {});
   const eigen = u.hinweise?.[app];
-  return Array.isArray(eigen) ? eigen.filter(h => alle.includes(h)) : (isAppAdmin(u, app) ? alle : []);
+  if (Array.isArray(eigen)) return eigen.filter(h => alle.includes(h));
+  if (isAppAdmin(u, app)) return alle;
+  return alle.filter(h => (CONFIG.apps[app].hinweise[h].standard || []).some(r => hatRecht(u, app, r)));
 };
 const isAnyAdmin = u => u.super || Object.keys(CONFIG.apps).some(a => isAppAdmin(u, a));
 
@@ -241,6 +248,7 @@ async function registrieren(req, env) {
   const pending = Object.values(users).filter(u => u.status === 'wartend').length;
   if (pending >= 30) fail(429, 'Zu viele offene Anfragen – bitte später erneut versuchen.');
   const first = !Object.keys(users).length;
+  if (first && CONFIG.hauptAdmin && nameKey(name) !== nameKey(CONFIG.hauptAdmin)) fail(403, 'Die Konten werden gerade eingerichtet. Bitte in ein paar Minuten noch einmal versuchen.');
   const u = { id: 'u' + b64u(rand(9)), name, pw: await hashPw(b.pw), status: first ? 'aktiv' : 'wartend', super: first, apps: {}, erstellt: new Date().toISOString(), sv: 0 };
   users[u.id] = u;
   await putUsers(env, users);

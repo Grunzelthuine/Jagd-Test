@@ -26,7 +26,7 @@ async function repairApp() {
 window.addEventListener('error', e => showRescue(e.message));
 window.addEventListener('unhandledrejection', e => { if (!(e.reason && e.reason.name === 'AbortError')) showRescue(e.reason?.message || e.reason); });
 
-const APP_VERSION = '2.24.17';
+const APP_VERSION = '2.24.18';
 /* Einstellungen je Installation (config.js): Konten-Server, Test-Umgebung, abweichende Speicherorte */
 const CONF = self.JAGD_CFG || {};
 const LSP = CONF.lsPrefix || '';
@@ -245,7 +245,10 @@ const canTermine = () => canRecht('termine');
 const canFreigabe = () => canRecht('freigabe');
 const canSperre = () => canRecht('sperre');
 const canSpeichern = () => isAdmin() || canTermine() || canFreigabe() || canSperre();
-const canSchalen = () => !!((((state.cfg.mode === 'voll' || state.cfg.mode === 'schalen') && state.cfg.token && !CONF.api) || window.Konto?.isAdmin()) && state.cfg.owner && state.cfg.repo2);
+const canSchalen = () => !!((((state.cfg.mode === 'voll' || state.cfg.mode === 'schalen') && state.cfg.token && !CONF.api) || window.Konto?.isAdmin() || window.Konto?.can('schalen')) && state.cfg.owner && state.cfg.repo2);
+/** Wer Wildmeldungen sieht und übernimmt: Admins alle, Konten mit Einzelrecht „Schalenwild eintragen“ die Schalenwild-Meldungen */
+const canMeldungen = () => isAdmin() || !!window.Konto?.can('schalen');
+const meineMeldungen = () => isAdmin() ? state.meldungen : state.meldungen.filter(m => m.typ === 'schalen');
 
 /* ================= Berechnungen ================= */
 const species = () => state.data.wildarten;
@@ -635,7 +638,7 @@ function pushNachSpeichern() {
   msgs.slice(0, 4).forEach(m => Konto.pushSend(m));
 }
 function pushDamwild(recs) {
-  if (!recs.length || !CONF.push || !window.Konto?.isAdmin()) return;
+  if (!recs.length || !CONF.push || !(window.Konto?.isAdmin() || window.Konto?.can('schalen'))) return;
   const plan = wildbretPlan();
   recs.slice(0, 3).forEach(rec => Konto.pushSend({
     title: 'Damwild erlegt',
@@ -679,13 +682,13 @@ async function changeMeldungen(fn, message) {
   throw new Error('Konflikt beim Speichern – bitte nochmal versuchen.');
 }
 async function loadMeldungen() {
-  if (!isAdmin() || !canMelden()) return;
+  if (!canMeldungen() || !canMelden()) return;
   try { state.meldungen = (await fetchMeldungen()).list; updateBadge(); if (state.tab === 'start') renderStart(); } catch { /* offline */ }
 }
 /** Zahl der offenen Meldungen am App-Symbol (nur beim Admin) */
 function updateBadge() {
-  if (!isAdmin() || !('setAppBadge' in navigator)) return;
-  const n = state.meldungen.length;
+  if (!canMeldungen() || !('setAppBadge' in navigator)) return;
+  const n = meineMeldungen().length;
   (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {});
 }
 /* Push über ntfy.sh: geheimer Kanal, gespeichert verschlüsselt in den Hauptdaten.
@@ -761,7 +764,7 @@ function openMelden() {
 }
 
 function openMeldungen() {
-  const list = [...state.meldungen].sort((a, b) => a.zeit.localeCompare(b.zeit));
+  const list = [...meineMeldungen()].sort((a, b) => a.zeit.localeCompare(b.zeit));
   const body = list.length ? `<div class="card"><ul class="nt-list">${list.map(m => `
       <li>
         <span class="nt-date ${m.datum ? '' : 'unk'}">${datumText(m.datum)}</span>
@@ -2176,7 +2179,7 @@ function ichFrage() {
 function openSettings() {
   const c = state.cfg;
   const body = `
-    <div class="alert info">${viaKonto() && isAdmin() ? '<b>Admin (über dein Konto).</b> Du kannst alles erfassen und verwalten.' : viaKonto() ? `<b>Angemeldet mit Konto.</b> Du kannst alles ansehen und Wild melden${[canTermine() && 'Termine eintragen', canFreigabe() && 'die Damwild-Freigabe ändern', canSperre() && 'die Hirschjagd-Sperre setzen'].filter(Boolean).map(t => ', ' + t).join('')}.` : isAdmin() ? '<b>Voller Zugang.</b> Du kannst alles erfassen und verwalten.' : canSchalen() ? '<b>Zugang Schalenwild.</b> Du kannst Reh-, Dam- und Schwarzwild eintragen, alles andere nur ansehen.' : '<b>Ansichtsmodus.</b> Zum Ansehen brauchst du nichts einzutragen.'}</div>
+    <div class="alert info">${viaKonto() && isAdmin() ? '<b>Admin (über dein Konto).</b> Du kannst alles erfassen und verwalten.' : viaKonto() ? `<b>Angemeldet mit Konto.</b> Du kannst alles ansehen und Wild melden${[canTermine() && 'Termine eintragen', canFreigabe() && 'die Damwild-Freigabe ändern', canSperre() && 'die Hirschjagd-Sperre setzen', window.Konto?.can('schalen') && 'Reh-, Dam- und Schwarzwild eintragen'].filter(Boolean).map(t => ', ' + t).join('')}.` : isAdmin() ? '<b>Voller Zugang.</b> Du kannst alles erfassen und verwalten.' : canSchalen() ? '<b>Zugang Schalenwild.</b> Du kannst Reh-, Dam- und Schwarzwild eintragen, alles andere nur ansehen.' : '<b>Ansichtsmodus.</b> Zum Ansehen brauchst du nichts einzutragen.'}</div>
     ${window.Konto?.settingsHtml() || ''}
     <fieldset><legend>${CONF.api ? 'Auf diesem Gerät' : 'Zugang'}</legend>
       <label class="field"><span>Ich bin</span>
@@ -3530,7 +3533,7 @@ function renderStart() {
     ${erinnerungBanner()}
     ${kontoKachel()}
     ${installAngebot(true) ? `<button class="start-tile inst-tile" id="btnInstall"><span class="st-title">📲 App installieren</span><span class="st-meta">${installPrompt ? 'Ein Tipp – dann liegt Jagd Thuine auf dem Startbildschirm' : 'So kommt Jagd Thuine auf den Startbildschirm'}</span><span class="st-go" aria-hidden="true">›</span></button>` : ''}
-    ${isAdmin() && state.meldungen.length ? `<button class="start-tile ml-tile" id="btnMeldungen"><span class="st-title">📬 ${state.meldungen.length} neue Meldung${state.meldungen.length === 1 ? '' : 'en'}</span><span class="st-meta">antippen zum Prüfen und Übernehmen</span><span class="st-go" aria-hidden="true">›</span></button>` : ''}
+    ${canMeldungen() && meineMeldungen().length ? `<button class="start-tile ml-tile" id="btnMeldungen"><span class="st-title">📬 ${meineMeldungen().length} neue Meldung${meineMeldungen().length === 1 ? '' : 'en'}</span><span class="st-meta">antippen zum Prüfen und Übernehmen</span><span class="st-go" aria-hidden="true">›</span></button>` : ''}
     ${canMelden() ? `<button class="start-tile melden-tile" id="btnMelden">
       <span class="st-title"><span class="mt-plus" aria-hidden="true">+</span> Wild melden</span>
       <span class="st-meta">Erlegtes Stück oder Fallwild melden</span>
@@ -3645,7 +3648,7 @@ window.Konto?.init({
     for (let i = 0; i < 40 && !(state.data && $('#lock').hidden); i++) await new Promise(r => setTimeout(r, 250));
     await ichFrage();
   },
-  badge: () => { if (isAdmin()) updateBadge(); else { try { navigator.clearAppBadge?.().catch(() => {}); } catch { /* egal */ } } },
+  badge: () => { if (canMeldungen()) updateBadge(); else { try { navigator.clearAppBadge?.().catch(() => {}); } catch { /* egal */ } } },
 });
 refreshLockKonto();
 load().then(() => { loadSchalen(); loadMeldungen(); });

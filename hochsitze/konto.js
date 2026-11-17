@@ -349,6 +349,12 @@ window.Konto = (() => {
       const sync = () => { $$('[data-kurecht]').forEach(c => { const [a, r] = c.dataset.kurecht.split(':'); const s = new Set(apps[a].rechte); c.checked ? s.add(r) : s.delete(r); apps[a].rechte = [...s]; });
         $$('[data-kuhinweis]').forEach(c => { const [a, h] = c.dataset.kuhinweis.split(':'); const s = new Set(apps[a].hinweise || []); c.checked ? s.add(h) : s.delete(h); apps[a].hinweise = [...s]; }); if (neu) { x.name = $('#kuName').value; x._pw = $('#kuPw').value; } };
       if (neu) { $('#kuName').value = x.name || ''; if (x._pw) $('#kuPw').value = x._pw; }
+      // Einzelrecht angehakt → passende Benachrichtigung vorauswählen (z. B. Schalenwild → Neue Wildmeldung)
+      $$('[data-kurecht]').forEach(c => c.addEventListener('change', () => {
+        if (!c.checked) return;
+        const [a, r] = c.dataset.kurecht.split(':');
+        Object.entries(inf.apps[a]?.hinweisAuto || {}).forEach(([h, rs]) => { const box = $(`[data-kuhinweis="${a}:${h}"]`); if (rs.includes(r) && box) box.checked = true; });
+      }));
       $('#kuSave')?.addEventListener('click', async e => {
         sync();
         const eigeneApps = Object.entries(apps).filter(([a]) => me.super || me.apps?.[a]?.rolle === 'admin');

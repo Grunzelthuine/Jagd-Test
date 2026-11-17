@@ -178,7 +178,7 @@ window.Konto = (() => {
           await nachAnmeldung();
           if (!dataPw() && hatZugang()) toast(isAdmin() ? 'Bitte einmal das Passwort der Jagdgemeinschaft eingeben – es wird dann im Server hinterlegt.' : 'Für dein Konto ist noch kein Daten-Passwort hinterlegt – bitte Sebastian Bescheid geben.', 6000);
           onDone?.(j);
-          setTimeout(() => pushFrage(), 700);
+          setTimeout(async () => { try { await H.nachAnmeldung?.(j); } catch { /* egal */ } pushFrage(); }, 700);
         } catch (e) { msg(e.message); b.disabled = false; }
       };
       $('#ktGo').addEventListener('click', go);

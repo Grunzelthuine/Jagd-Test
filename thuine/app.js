@@ -26,7 +26,7 @@ async function repairApp() {
 window.addEventListener('error', e => showRescue(e.message));
 window.addEventListener('unhandledrejection', e => { if (!(e.reason && e.reason.name === 'AbortError')) showRescue(e.reason?.message || e.reason); });
 
-const APP_VERSION = '2.24.11';
+const APP_VERSION = '2.24.12';
 /* Einstellungen je Installation (config.js): Konten-Server, Test-Umgebung, abweichende Speicherorte */
 const CONF = self.JAGD_CFG || {};
 const LSP = CONF.lsPrefix || '';
@@ -228,13 +228,15 @@ function defaultCfg() {
 }
 // Rollen: 'voll' = alles bearbeiten (Sebastian), 'schalen' = nur Reh- & Dammwild eintragen, '' = nur ansehen
 if (state.cfg.token && !state.cfg.mode) state.cfg.mode = 'voll';
+// Mit Konten-Server gibt es keinen Token-Zugang mehr – alten Token vom Gerät entfernen
+if (CONF.api && (state.cfg.token || state.cfg.mode)) { state.cfg.token = ''; state.cfg.mode = ''; lsSet(LS_CFG, state.cfg); }
 // Ohne vollen Zugang gilt immer der Standard-Speicherort (aus dem Link) – versehentliche Änderungen werden so repariert
 // In der Test-Umgebung immer die Test-Speicherorte (nie versehentlich in die echten Daten schreiben)
 if ((state.cfg.mode !== 'voll' && location.hostname.endsWith('.github.io')) || CONF.test) {
   const d = defaultCfg(); Object.assign(state.cfg, { owner: d.owner, repo: d.repo, repo2: d.repo2, path: d.path });
 }
 /* Zugang: GitHub-Token auf dem Gerät (bisher) ODER Konto beim Konten-Server */
-const tokenAdmin = () => !!(state.cfg.mode === 'voll' && state.cfg.token && state.cfg.owner && state.cfg.repo);
+const tokenAdmin = () => !CONF.api && !!(state.cfg.mode === 'voll' && state.cfg.token && state.cfg.owner && state.cfg.repo);
 const viaKonto = () => !tokenAdmin() && !!window.Konto?.hatZugang();
 const isAdmin = () => tokenAdmin() || !!(window.Konto?.isAdmin() && state.cfg.owner && state.cfg.repo);
 /** Einzelrechte (vom Admin je Person freigegeben): Termine, Damwild-Freigabe, Hirschjagd-Sperre */
@@ -243,7 +245,7 @@ const canTermine = () => canRecht('termine');
 const canFreigabe = () => canRecht('freigabe');
 const canSperre = () => canRecht('sperre');
 const canSpeichern = () => isAdmin() || canTermine() || canFreigabe() || canSperre();
-const canSchalen = () => !!((((state.cfg.mode === 'voll' || state.cfg.mode === 'schalen') && state.cfg.token) || window.Konto?.isAdmin()) && state.cfg.owner && state.cfg.repo2);
+const canSchalen = () => !!((((state.cfg.mode === 'voll' || state.cfg.mode === 'schalen') && state.cfg.token && !CONF.api) || window.Konto?.isAdmin()) && state.cfg.owner && state.cfg.repo2);
 
 /* ================= Berechnungen ================= */
 const species = () => state.data.wildarten;
@@ -409,6 +411,7 @@ async function load(fromUnlock = false) {
     state.data = remote; lsSet(LS_DATA, remote);
     pushMerken();
     render();
+    setTimeout(() => ichFrage(), 1200);
     if (state.schalenFresh) migrateSchalen();
   } catch (e) {
     if (e instanceof NeedPassword) {
@@ -2091,6 +2094,44 @@ function applyAiResult(res, photo) {
   renderEditor();
 }
 
+/* ================= „Wer bist du?“ – beim ersten Öffnen bzw. nach der ersten Anmeldung ================= */
+const LS_ICH_GEFRAGT = 'sb.ichGefragt.v1';
+const normName = t => String(t || '').trim().toLowerCase().replace(/\s+/g, ' ');
+const ichKandidaten = () => state.data.schuetzen.filter(s => isMember(s, seasonOf(todayISO())));
+/** Passt der Konto-Name („Vorname Nachname“) eindeutig zu einem Schützen? */
+function ichAusKonto() {
+  const n = window.Konto?.loggedIn() ? normName(Konto.user()?.name) : '';
+  if (!n) return null;
+  const t = ichKandidaten().filter(s => normName(s.vollname) === n);
+  return t.length === 1 ? t[0] : null;
+}
+function ichSetzen(id) { state.cfg.ich = id; lsSet(LS_CFG, state.cfg); lsSet(LS_ICH_GEFRAGT, true); }
+/** Fragt einmal je Gerät, wer die App benutzt (gleiche Einstellung wie „Ich bin“ in den Einstellungen).
+    Bei einem Konto mit passendem Namen wird ohne Frage zugeordnet. Promise ist erfüllt, wenn erledigt/geschlossen. */
+function ichFrage() {
+  if (ichFrage._p) return ichFrage._p;
+  if (!state.data || !$('#lock').hidden || (state.cfg.ich && shooterById(state.cfg.ich))) return Promise.resolve();
+  const k = ichAusKonto();
+  if (k) { ichSetzen(k.id); toast(`Du bist als ${k.vollname || k.name} eingetragen ✓`); return Promise.resolve(); }
+  if (lsGet(LS_ICH_GEFRAGT, false) || !$('#sheet').hidden) return Promise.resolve();
+  const nach = s => { const v = (s.vollname || s.name).trim(); return v.split(' ').slice(-1)[0] + ' ' + v; };
+  const list = ichKandidaten().sort((a, b) => nach(a).localeCompare(nach(b), 'de'));
+  if (!list.length) return Promise.resolve();
+  ichFrage._p = new Promise(resolve => {
+    openSheet('Wer bist du?', `<p class="hint">Bitte einmal antippen, wer du bist. Dann ist dein Name z. B. beim Wild-Melden schon eingetragen. Ändern kannst du das jederzeit unter Einstellungen → „Ich bin“.</p>
+      <div class="ich-liste">${list.map(s => `<button type="button" class="ich-btn" data-ich="${esc(s.id)}">${esc(s.vollname || s.name)}</button>`).join('')}</div>`,
+      '<button class="btn secondary block" id="ichNein">Ich bin nicht in der Liste</button>');
+    const fertig = () => { mo.disconnect(); lsSet(LS_ICH_GEFRAGT, true); ichFrage._p = null; resolve(); };
+    const mo = new MutationObserver(() => { if ($('#sheet').hidden) fertig(); });
+    mo.observe($('#sheet'), { attributes: true, attributeFilter: ['hidden'] });
+    $$('[data-ich]', $('#sheet')).forEach(b => b.addEventListener('click', () => {
+      ichSetzen(b.dataset.ich); closeSheet(); toast(`Hallo ${(shooterName(b.dataset.ich) || '').split(' ')[0]} ✓`);
+    }));
+    $('#ichNein').addEventListener('click', () => closeSheet());
+  });
+  return ichFrage._p;
+}
+
 /* ================= Einstellungen ================= */
 function openSettings() {
   const c = state.cfg;
@@ -2101,7 +2142,7 @@ function openSettings() {
       <label class="field"><span>Ich bin</span>
         <select id="cfIch"><option value="">– bitte wählen –</option>${state.data.schuetzen.filter(s => isMember(s, seasonOf(todayISO())) || s.id === c.ich).map(s => `<option value="${esc(s.id)}" ${s.id === c.ich ? 'selected' : ''}>${esc(s.vollname || s.name)}</option>`).join('')}</select>
       </label>
-      ${CONF.api ? `<details ${tokenAdmin() ? 'open' : ''}><summary>Zugang mit GitHub-Token (bisherige Methode)</summary>` : ''}
+      ${CONF.api ? '' : `
       <label class="field"><span>Berechtigung</span>
         <select id="cfMode">
           <option value="" ${!c.mode ? 'selected' : ''}>Nur ansehen</option>
@@ -2110,7 +2151,7 @@ function openSettings() {
         </select>
       </label>
       <label class="field"><span>Zugriffs-Token (nur auf diesem Gerät gespeichert)</span><input id="cfToken" type="password" value="${esc(c.token)}" placeholder="github_pat_…" autocomplete="off"></label>
-      <p class="hint">Den Token bekommst du von Sebastian. Er wird nur auf diesem Gerät gespeichert.${CONF.api ? ' Mit einem Konto (oben) ist kein Token nötig.' : ''}</p>
+      <p class="hint">Den Token bekommst du von Sebastian. Er wird nur auf diesem Gerät gespeichert.</p>
       ${c.mode === 'voll' ? `<details><summary>Speicherort (GitHub)</summary>
         <div class="grid2" style="margin-top:10px">
           <label class="field"><span>Konto</span><input id="cfOwner" value="${esc(c.owner)}" autocapitalize="off" autocorrect="off"></label>
@@ -2118,7 +2159,7 @@ function openSettings() {
         </div>
         <label class="field" style="margin-top:10px"><span>Repository Schalenwild</span><input id="cfRepo2" value="${esc(c.repo2)}" autocapitalize="off" autocorrect="off"></label>
       </details>` : ''}
-      ${CONF.api ? '</details>' : ''}
+      `}
     </fieldset>
     <fieldset><legend>Termine</legend>
       <label class="check-row"><input type="checkbox" id="cfErinnerung" ${c.erinnerung !== false ? 'checked' : ''}> <span><b>Erinnerung 60 Minuten vorher</b><small>„In Kalender“ übernimmt den Termin mit Erinnerung, und die App zeigt in der letzten Stunde einen Hinweis auf der Startseite.</small></span></label>
@@ -2243,8 +2284,8 @@ function openSettings() {
     }
     Object.assign(state.cfg, {
       owner: $('#cfOwner')?.value.trim() ?? state.cfg.owner, repo: $('#cfRepo')?.value.trim() ?? state.cfg.repo, repo2: $('#cfRepo2')?.value.trim() ?? state.cfg.repo2,
-      token: $('#cfToken').value.trim(), apiKey: $('#cfKey').value.trim(), model: $('#cfModel').value,
-      mode: $('#cfMode').value, ich: $('#cfIch').value, erinnerung: $('#cfErinnerung').checked,
+      token: CONF.api ? '' : ($('#cfToken')?.value.trim() ?? state.cfg.token), apiKey: $('#cfKey').value.trim(), model: $('#cfModel').value,
+      mode: CONF.api ? '' : ($('#cfMode')?.value ?? state.cfg.mode), ich: $('#cfIch').value, erinnerung: $('#cfErinnerung').checked,
     });
     if (pwChanged) { state.pwOld = state.pw; state.pw = newPw; lsSet(LS_PW, newPw); }
     if (!pwChanged) loadSchalen();
@@ -2730,8 +2771,10 @@ function switchTab(tab, fromPop = false) {
     else if (sec === 'start' && histLvl() === 1 && !(history.state && history.state.sheet)) histBack();
   }
   state.tab = tab;
-  $('.tabbar').hidden = sec === 'start';
-  $$('.tab').forEach(t => { t.classList.toggle('active', t.dataset.tab === tab); t.hidden = !!t.dataset.sec && t.dataset.sec !== sec; });
+  // Leiste unten immer sichtbar: auf Start/Termine/Berichte „Niederwild | Schalenwild“, sonst die Seiten des Bereichs
+  const barSec = sec === 'nieder' || sec === 'schalen' ? sec : 'start';
+  $('.tabbar').hidden = false;
+  $$('.tab').forEach(t => { t.classList.toggle('active', t.dataset.tab === tab); t.hidden = !!t.dataset.sec && t.dataset.sec !== barSec; });
   const view = tab.startsWith('schalen') ? 'schalen' : tab;
   $$('.view').forEach(v => (v.hidden = v.dataset.view !== view));
   if (view === 'schalen') renderSchalen();
@@ -3481,6 +3524,11 @@ window.Konto?.init({
   getPw: () => state.pw,
   setPw: async pw => { state.pw = pw; state.pwOld = ''; lsSet(LS_PW, pw); await load(true); if ($('#lock').hidden) loadSchalen(); },
   onChange: () => { refreshLockKonto(); if (state.data && $('#lock').hidden) { render(); loadSchalen(); loadMeldungen(); } },
+  // Nach der Anmeldung (vor der Frage nach Benachrichtigungen): „Wer bist du?“, sobald die Daten offen sind
+  nachAnmeldung: async () => {
+    for (let i = 0; i < 40 && !(state.data && $('#lock').hidden); i++) await new Promise(r => setTimeout(r, 250));
+    await ichFrage();
+  },
   badge: () => { if (isAdmin()) updateBadge(); else { try { navigator.clearAppBadge?.().catch(() => {}); } catch { /* egal */ } } },
 });
 refreshLockKonto();

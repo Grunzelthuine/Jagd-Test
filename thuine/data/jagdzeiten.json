@@ -4,7 +4,17 @@
  "rechtsgrundlage": "DVO-NJagdG vom 23. Mai 2008 (Nds. GVBl. S. 194), zuletzt geändert durch Verordnung vom 5. Oktober 2026 (Nds. GVBl. Nr. 84), und Bundes-Jagdzeitenverordnung",
  "quelle": {
   "titel": "Nds. Landwirtschaftsministerium: Aktuelle Jagdzeiten in Niedersachsen (konsolidierte Fassung)",
-  "url": "https://www.ml.niedersachsen.de/startseite/themen/wald_holz_jagd/jagd_in_niedersachsen/gesetze-und-andere-bestimmungen-rund-um-das-thema-jagd-und-jager-5137.html"
+  "url": "https://www.ml.niedersachsen.de/startseite/themen/wald_holz_jagd/jagd_in_niedersachsen/gesetze-und-andere-bestimmungen-rund-um-das-thema-jagd-und-jager-5137.html",
+  "pdfs": [
+   {
+    "titel": "Aktuelle Jagdzeiten in Niedersachsen, konsolidierte Fassung (Stand 06.10.2026)",
+    "url": "https://www.ml.niedersachsen.de/download/163729/Aktuelle_Jagdzeiten_in_Niedersachsen_Stand_06.10.2026_.pdf"
+   },
+   {
+    "titel": "Verordnung zur Durchführung des NJagdG (DVO-NJagdG), zuletzt geändert am 5. Oktober 2026",
+    "url": "https://www.ml.niedersachsen.de/download/179303/Verordnung_zur_Durchfuehrung_des_NJagdG_zuletzt_geaendert_durch_Verordnung_vom_5._Oktober_2026_Nds._GVBl._Nr._84_.pdf"
+   }
+  ]
  },
  "geprueft": "2026-11-17",
  "gruppen": [

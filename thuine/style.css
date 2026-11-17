@@ -703,3 +703,6 @@ input[type="date"]::-webkit-date-and-time-value, input[type="time"]::-webkit-dat
 .jz-quelle { margin-top: 16px; font-size: 14px; }
 .jz-quelle p { margin: 0 0 6px; }
 .jz-quelle a { color: var(--green); word-break: break-word; }
+.jz-pdf { display: flex; gap: 10px; align-items: center; margin: 8px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper-2); color: var(--ink) !important; text-decoration: none; font-weight: 600; font-size: 14px; }
+.jz-pdf small { display: block; font-weight: 500; font-size: 12px; color: var(--green); }
+.jz-pdf > span:first-child { font-size: 20px; }

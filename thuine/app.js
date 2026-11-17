@@ -26,7 +26,7 @@ async function repairApp() {
 window.addEventListener('error', e => showRescue(e.message));
 window.addEventListener('unhandledrejection', e => { if (!(e.reason && e.reason.name === 'AbortError')) showRescue(e.reason?.message || e.reason); });
 
-const APP_VERSION = '2.24.15';
+const APP_VERSION = '2.24.16';
 /* Einstellungen je Installation (config.js): Konten-Server, Test-Umgebung, abweichende Speicherorte */
 const CONF = self.JAGD_CFG || {};
 const LSP = CONF.lsPrefix || '';
@@ -3022,6 +3022,7 @@ function renderJagdzeiten() {
     ${gruppen || '<div class="card pad empty"><p>Heute ist für keine Wildart Jagdzeit.</p></div>'}
     <div class="card pad jz-quelle">
       <p><b>Quelle:</b> ${d.quelle?.url ? `<a href="${esc(d.quelle.url)}" target="_blank" rel="noopener">${esc(d.quelle.titel || d.quelle.url)}</a>` : esc(d.quelle?.titel || '')}</p>
+      ${(d.quelle?.pdfs || []).filter(x => /^https:\/\//.test(x.url || '')).map(x => `<a class="jz-pdf" href="${esc(x.url)}" target="_blank" rel="noopener"><span aria-hidden="true">📄</span><span>${esc(x.titel || 'PDF')}<small>PDF beim Ministerium öffnen</small></span></a>`).join('')}
       <p class="hint">${esc(d.rechtsgrundlage || '')}. Zuletzt mit der Quelle abgeglichen am ${esc(dateDE(d.geprueft || d.stand))}.</p>
       <p class="hint">Angaben ohne Gewähr – maßgeblich ist die Verordnung. Örtliche Regelungen (z. B. Abschussplan, Freigabe der Jagdgemeinschaft, Vogelschutz- und Naturschutzgebiete, Elterntierschutz) gelten zusätzlich.</p>
     </div>`;
